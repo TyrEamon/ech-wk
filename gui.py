@@ -63,7 +63,7 @@ try:
                                   QMessageBox, QInputDialog, QSystemTrayIcon, QMenu, QAction,
                                   QScrollArea)
     from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QPropertyAnimation, QEasingCurve
-    from PyQt5.QtGui import QIcon, QTextCursor, QFont
+    from PyQt5.QtGui import QIcon, QTextCursor, QFont, QPainter, QPen, QColor
     HAS_PYQT = True
     
     # 注册 QTextCursor 类型以避免信号槽错误
@@ -86,7 +86,7 @@ except ImportError:
     print("安装命令: pip3 install PyQt5")
     sys.exit(1)
 
-APP_VERSION = "1.6"
+APP_VERSION = "1.7"
 APP_TITLE = f"ECH Workers 客户端 v{APP_VERSION}"
 
 # 中国IP列表文件名（离线版本，放在程序目录）
@@ -417,6 +417,58 @@ class LatencyTestThread(QThread):
             self.result_ready.emit(False, str(e), self.test_url)
 
 
+class PowerButton(QPushButton):
+    """自绘电源按钮，避免 Unicode 电源符号在部分字体中显示成方块。"""
+
+    def __init__(self, text="Tap to Connect", parent=None):
+        super().__init__(parent)
+        self.label_text = text
+        self.is_running = False
+        self.setObjectName("powerButton")
+        self.setCursor(Qt.PointingHandCursor)
+
+    def set_power_state(self, running, text):
+        self.is_running = running
+        self.label_text = text
+        self.setProperty("running", running)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        color = QColor("#7df4ff" if self.is_running else "#d7e3ea")
+        pen = QPen(color, 4)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+
+        center_x = self.width() / 2
+        icon_top = 34
+        radius = 19
+        # 画一个留出口的电源圆弧。
+        painter.drawArc(
+            int(center_x - radius),
+            icon_top,
+            radius * 2,
+            radius * 2,
+            210 * 16,
+            300 * 16,
+        )
+        painter.drawLine(int(center_x), icon_top - 5, int(center_x), icon_top + 18)
+
+        painter.setPen(color)
+        font = self.font()
+        font.setPointSize(13)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(0, 82, self.width(), 26, Qt.AlignCenter, self.label_text)
+
+
 class MainWindow(QMainWindow):
     """主窗口"""
     
@@ -517,8 +569,7 @@ class MainWindow(QMainWindow):
         self.hero_status_label.setAlignment(Qt.AlignCenter)
         home_layout.addWidget(self.hero_status_label)
 
-        self.power_btn = QPushButton("⏻\nTap to Connect")
-        self.power_btn.setObjectName("powerButton")
+        self.power_btn = PowerButton("Tap to Connect")
         self.power_btn.clicked.connect(self.toggle_connection)
         home_layout.addWidget(self.power_btn, 0, Qt.AlignCenter)
 
@@ -544,7 +595,26 @@ class MainWindow(QMainWindow):
         selected_arrow.setObjectName("selectedArrow")
         selected_layout.addWidget(selected_arrow)
         home_layout.addWidget(selected_card)
-        home_layout.addStretch(2)
+
+        live_log_card = QFrame()
+        live_log_card.setObjectName("homeLogCard")
+        live_log_layout = QVBoxLayout(live_log_card)
+        live_log_layout.setContentsMargins(12, 10, 12, 10)
+        live_log_layout.setSpacing(6)
+        live_log_title = QLabel("Realtime Log")
+        live_log_title.setObjectName("selectedLabel")
+        live_log_layout.addWidget(live_log_title)
+        self.home_log_text = QTextEdit()
+        self.home_log_text.setObjectName("homeLogText")
+        self.home_log_text.setReadOnly(True)
+        self.home_log_text.setMinimumHeight(92)
+        self.home_log_text.setMaximumHeight(116)
+        font = QFont("Consolas" if sys.platform == 'win32' else "Monaco" if sys.platform == 'darwin' else "DejaVu Sans Mono", 8)
+        self.home_log_text.setFont(font)
+        self.home_log_text.setPlainText("[ ] Awaiting input...")
+        live_log_layout.addWidget(self.home_log_text)
+        home_layout.addWidget(live_log_card)
+        home_layout.addStretch(1)
         self.pages.addWidget(home_page)
 
         server_page = QWidget()
@@ -558,7 +628,7 @@ class MainWindow(QMainWindow):
         server_content = QWidget()
         server_content.setObjectName("pageContent")
         server_layout = QVBoxLayout(server_content)
-        server_layout.setContentsMargins(22, 18, 22, 22)
+        server_layout.setContentsMargins(22, 18, 22, 90)
         server_layout.setSpacing(14)
 
         proxy_title = QLabel("服务器管理")
@@ -588,10 +658,33 @@ class MainWindow(QMainWindow):
         self.server_cards_layout.setSpacing(10)
         server_layout.addLayout(self.server_cards_layout)
 
+        server_layout.addStretch()
+        server_scroll.setWidget(server_content)
+        server_outer.addWidget(server_scroll, 1)
+
+        fab_row = QHBoxLayout()
+        fab_row.setContentsMargins(0, 0, 22, 18)
+        fab_row.addStretch()
         btn_new = QPushButton("+")
         btn_new.setObjectName("fabButton")
-        btn_new.clicked.connect(self.add_server)
-        server_layout.addWidget(btn_new, 0, Qt.AlignRight)
+        btn_new.clicked.connect(self.open_blank_server_config)
+        fab_row.addWidget(btn_new)
+        server_outer.addLayout(fab_row)
+        self.pages.addWidget(server_page)
+
+        config_page = QWidget()
+        config_outer = QVBoxLayout(config_page)
+        config_outer.setContentsMargins(0, 0, 0, 0)
+        config_outer.setSpacing(0)
+        config_scroll = QScrollArea()
+        config_scroll.setObjectName("pageScroll")
+        config_scroll.setWidgetResizable(True)
+        config_scroll.setFrameShape(QScrollArea.NoFrame)
+        config_content = QWidget()
+        config_content.setObjectName("pageContent")
+        config_layout_outer = QVBoxLayout(config_content)
+        config_layout_outer.setContentsMargins(18, 18, 18, 22)
+        config_layout_outer.setSpacing(14)
 
         config_panel, config_layout = self._create_panel("当前配置", "这里编辑的是选中服务器的真实参数")
         self.server_combo = QComboBox()
@@ -660,11 +753,11 @@ class MainWindow(QMainWindow):
         self.auto_start_check = QCheckBox("开机启动")
         self.auto_start_check.stateChanged.connect(self.on_auto_start_changed)
         config_layout.addWidget(self.auto_start_check)
-        server_layout.addWidget(config_panel)
-        server_layout.addStretch()
-        server_scroll.setWidget(server_content)
-        server_outer.addWidget(server_scroll)
-        self.pages.addWidget(server_page)
+        config_layout_outer.addWidget(config_panel)
+        config_layout_outer.addStretch()
+        config_scroll.setWidget(config_content)
+        config_outer.addWidget(config_scroll)
+        self.pages.addWidget(config_page)
 
         log_page = QWidget()
         log_outer = QVBoxLayout(log_page)
@@ -697,7 +790,7 @@ class MainWindow(QMainWindow):
         bottom_layout.setContentsMargins(12, 8, 12, 8)
         bottom_layout.setSpacing(6)
         self.nav_buttons = []
-        for text, index in [("Home", 0), ("Proxies", 1), ("Logs", 2)]:
+        for text, index in [("Home", 0), ("Proxies", 1), ("Logs", 3)]:
             btn = self._create_nav_button(text, index)
             self.nav_buttons.append(btn)
             bottom_layout.addWidget(btn, 1)
@@ -1063,10 +1156,10 @@ class MainWindow(QMainWindow):
         card = QPushButton()
         card.setObjectName("serverCard")
         card.setProperty("selected", selected)
-        card.setText(f"{name}\n{server_addr}\n监听 {listen} · {routing}")
+        card.setText(f"{name}    编辑\n{server_addr}\n监听 {listen} · {routing}")
         card.setCheckable(True)
         card.setChecked(selected)
-        card.clicked.connect(lambda: self._select_server_from_card(server.get('id')))
+        card.clicked.connect(lambda: self.open_server_config(server.get('id')))
         return card
 
     def _clear_layout(self, layout):
@@ -1097,13 +1190,50 @@ class MainWindow(QMainWindow):
                 self.server_combo.setCurrentIndex(i)
                 break
 
+    def open_server_config(self, server_id):
+        """进入选中服务器的配置页。"""
+        self._select_server_from_card(server_id)
+        self._set_current_page(2)
+
+    def open_blank_server_config(self):
+        """创建一个空白服务器配置并进入配置页。"""
+        if self.process_thread and self.process_thread.is_running:
+            QMessageBox.warning(self, "提示", "请先停止当前连接后再新增服务器")
+            return
+
+        import uuid
+        existing_names = {server.get('name') for server in self.config_manager.servers}
+        index = 1
+        name = "新服务器"
+        while name in existing_names:
+            index += 1
+            name = f"新服务器{index}"
+
+        new_server = {
+            'id': str(uuid.uuid4()),
+            'name': name,
+            'server': '',
+            'listen': '127.0.0.1:30000',
+            'token': '',
+            'ip': '',
+            'dns': 'dns.alidns.com/dns-query',
+            'ech': 'cloudflare-ech.com',
+            'routing_mode': 'bypass_cn',
+        }
+        self.config_manager.servers.append(new_server)
+        self.config_manager.current_server_id = new_server['id']
+        self.refresh_server_combo()
+        self.load_server_config()
+        self._set_current_page(2)
+        self.append_log(f"[系统] 已创建空白配置: {name}\n")
+
     def toggle_connection(self):
         """主页大按钮：未运行时启动，运行时停止。"""
         if self.process_thread and self.process_thread.is_running:
             self.stop_process()
         else:
             if hasattr(self, 'power_btn'):
-                self.power_btn.setText("⏻\nConnecting...")
+                self.power_btn.set_power_state(False, "Connecting...")
                 self.power_btn.setEnabled(False)
             self.start_process()
 
@@ -1782,6 +1912,7 @@ class MainWindow(QMainWindow):
         /* Stitch-style ECH functional shell */
         QWidget#appRoot {
             background-color: #0b0e16;
+            font-family: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", Arial, sans-serif;
         }
 
         QFrame#mobileHeader {
@@ -1827,12 +1958,14 @@ class MainWindow(QMainWindow):
             color: #f4f7ff;
             font-size: 30px;
             font-weight: 800;
+            font-family: "Segoe UI", "Microsoft YaHei UI", Arial, sans-serif;
         }
 
         QLabel#heroTitle {
             color: #d7f8ff;
             font-size: 16px;
             font-weight: 700;
+            font-family: "Segoe UI", "Microsoft YaHei UI", Arial, sans-serif;
         }
 
         QPushButton#powerButton {
@@ -1846,6 +1979,7 @@ class MainWindow(QMainWindow):
             max-height: 130px;
             font-size: 18px;
             font-weight: 800;
+            font-family: "Segoe UI", "Microsoft YaHei UI", Arial, sans-serif;
             padding: 12px;
         }
 
@@ -1865,6 +1999,21 @@ class MainWindow(QMainWindow):
             background-color: #151824;
             border: 1px solid #273142;
             border-radius: 9px;
+        }
+
+        QFrame#homeLogCard {
+            background-color: #11131b;
+            border: 1px solid #273142;
+            border-radius: 10px;
+        }
+
+        QTextEdit#homeLogText {
+            color: #b9cacb;
+            background-color: #080b12;
+            border: 1px solid #1f2632;
+            border-radius: 8px;
+            padding: 8px;
+            font-size: 11px;
         }
 
         QLabel#nodeIcon {
@@ -1892,6 +2041,7 @@ class MainWindow(QMainWindow):
             color: #f4f7ff;
             font-size: 15px;
             font-weight: 800;
+            font-family: "Segoe UI", "Microsoft YaHei UI", Arial, sans-serif;
         }
 
         QLabel#selectedArrow {
@@ -2304,11 +2454,8 @@ class MainWindow(QMainWindow):
                 "填写服务地址和监听地址后即可启动代理。"
             )
         if hasattr(self, 'power_btn'):
-            self.power_btn.setText("⏻\nTap to Disconnect" if running else "⏻\nTap to Connect")
+            self.power_btn.set_power_state(running, "Tap to Disconnect" if running else "Tap to Connect")
             self.power_btn.setEnabled(True)
-            self.power_btn.setProperty("running", running)
-            self.power_btn.style().unpolish(self.power_btn)
-            self.power_btn.style().polish(self.power_btn)
         self._update_dashboard_summary()
     
     def init_server_combo(self):
@@ -2580,14 +2727,14 @@ class MainWindow(QMainWindow):
         
         if not server.get('server'):
             if hasattr(self, 'power_btn'):
-                self.power_btn.setText("⏻\nTap to Connect")
+                self.power_btn.set_power_state(False, "Tap to Connect")
                 self.power_btn.setEnabled(True)
             QMessageBox.warning(self, "提示", "请输入服务地址")
             return
         
         if not server.get('listen'):
             if hasattr(self, 'power_btn'):
-                self.power_btn.setText("⏻\nTap to Connect")
+                self.power_btn.set_power_state(False, "Tap to Connect")
                 self.power_btn.setEnabled(True)
             QMessageBox.warning(self, "提示", "请输入监听地址")
             return
@@ -2787,10 +2934,25 @@ class MainWindow(QMainWindow):
     def clear_log(self):
         """清空日志"""
         self.log_text.clear()
+        if hasattr(self, 'home_log_text'):
+            self.home_log_text.setPlainText("[ ] Awaiting input...")
     
     def append_log(self, text):
         """追加日志"""
         self.log_text.append(text)
+        if hasattr(self, 'home_log_text'):
+            try:
+                current = self.home_log_text.toPlainText()
+                lines = [] if current == "[ ] Awaiting input..." else current.splitlines()
+                for line in text.splitlines():
+                    line = line.strip()
+                    if line:
+                        lines.append(line)
+                self.home_log_text.setPlainText('\n'.join(lines[-5:]) or "[ ] Awaiting input...")
+                home_scrollbar = self.home_log_text.verticalScrollBar()
+                home_scrollbar.setValue(home_scrollbar.maximum())
+            except:
+                pass
         try:
             scrollbar = self.log_text.verticalScrollBar()
             scrollbar.setValue(scrollbar.maximum())
