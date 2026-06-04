@@ -258,6 +258,9 @@ jobs:
           
           # GUI（仅桌面版）
           if [ "${{ matrix.enable_gui }}" = "true" ]; then
+            if [ -f "app_icon.png" ]; then
+              cp app_icon.png release/
+            fi
             if [ "${{ matrix.goos }}" == "windows" ]; then
               if [ -f "dist/ECHWorkersGUI.exe" ]; then
                 cp dist/ECHWorkersGUI.exe release/

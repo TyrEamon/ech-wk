@@ -62,7 +62,7 @@ try:
                                   QMessageBox, QInputDialog, QSystemTrayIcon, QMenu, QAction,
                                   QScrollArea)
     from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize
-    from PyQt5.QtGui import QIcon, QTextCursor, QPixmap, QPainter, QColor, QFont
+    from PyQt5.QtGui import QIcon, QTextCursor, QFont
     HAS_PYQT = True
     
     # 注册 QTextCursor 类型以避免信号槽错误
@@ -85,7 +85,7 @@ except ImportError:
     print("安装命令: pip3 install PyQt5")
     sys.exit(1)
 
-APP_VERSION = "1.4"
+APP_VERSION = "1.5"
 APP_TITLE = f"ECH Workers 客户端 v{APP_VERSION}"
 
 # 中国IP列表文件名（离线版本，放在程序目录）
@@ -423,7 +423,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(820, 600)
 
         # 设置窗口图标
-        self.setWindowIcon(self._create_matrix_icon())
+        self.setWindowIcon(self._create_app_icon())
         
         # 应用现代深色样式
         self.setStyleSheet(self._get_modern_style())
@@ -628,61 +628,26 @@ class MainWindow(QMainWindow):
         scroll_area.setWidget(content_widget)
         root_layout.addWidget(scroll_area, 1)
     
-    def _create_matrix_icon(self):
-        """创建黑客帝国风格图标"""
-        # 创建不同尺寸的图标
-        sizes = [16, 32, 48, 64, 128, 256]
-        icon = QIcon()
-        
-        for size in sizes:
-            pixmap = QPixmap(size, size)
-            pixmap.fill(QColor(0, 0, 0))  # 黑色背景
-            
-            painter = QPainter(pixmap)
-            painter.setRenderHint(QPainter.Antialiasing)
-            
-            # 绘制绿色边框
-            painter.setPen(QColor(0, 255, 65))  # 矩阵绿
-            painter.setBrush(Qt.NoBrush)
-            painter.drawRect(2, 2, size - 4, size - 4)
-            
-            # 绘制内部装饰（矩阵代码风格）
-            if size >= 32:
-                # 绘制一些绿色线条和点，模拟矩阵代码
-                painter.setPen(QColor(0, 255, 65))
-                
-                # 绘制对角线
-                if size >= 48:
-                    painter.drawLine(4, 4, size - 4, size - 4)
-                    painter.drawLine(size - 4, 4, 4, size - 4)
-                
-                # 绘制中心点
-                center = size // 2
-                painter.setBrush(QColor(0, 255, 65))
-                painter.drawEllipse(center - 2, center - 2, 4, 4)
-                
-                # 绘制一些装饰线条
-                if size >= 64:
-                    # 绘制四个角的装饰
-                    corner_size = size // 4
-                    painter.setPen(QColor(0, 200, 50))  # 稍暗的绿色
-                    # 左上角
-                    painter.drawLine(4, 4, corner_size, 4)
-                    painter.drawLine(4, 4, 4, corner_size)
-                    # 右上角
-                    painter.drawLine(size - 4, 4, size - corner_size, 4)
-                    painter.drawLine(size - 4, 4, size - 4, corner_size)
-                    # 左下角
-                    painter.drawLine(4, size - 4, corner_size, size - 4)
-                    painter.drawLine(4, size - 4, 4, size - corner_size)
-                    # 右下角
-                    painter.drawLine(size - 4, size - 4, size - corner_size, size - 4)
-                    painter.drawLine(size - 4, size - 4, size - 4, size - corner_size)
-            
-            painter.end()
-            icon.addPixmap(pixmap)
-        
-        return icon
+    def _create_app_icon(self):
+        """加载应用图标，优先使用打包后的可执行文件图标。"""
+        candidates = []
+        if getattr(sys, 'frozen', False):
+            candidates.append(Path(sys.executable))
+
+        app_dir = get_app_dir()
+        candidates.extend([
+            app_dir / 'app_icon.ico',
+            app_dir / 'app_icon.png',
+            app_dir / 'app_icon.icns',
+        ])
+
+        for path in candidates:
+            if path.exists():
+                icon = QIcon(str(path))
+                if not icon.isNull():
+                    return icon
+
+        return self.style().standardIcon(self.style().SP_ComputerIcon)
     
     def _get_modern_style(self):
         """获取现代深色样式表"""
@@ -1253,9 +1218,9 @@ class MainWindow(QMainWindow):
         # 创建系统托盘图标
         self.tray_icon = QSystemTrayIcon(self)
         
-        # 使用黑客帝国风格图标
+        # 使用应用图标
         try:
-            icon = self._create_matrix_icon()
+            icon = self._create_app_icon()
             self.tray_icon.setIcon(icon)
         except:
             # 如果创建图标失败，使用默认图标
