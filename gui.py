@@ -58,10 +58,11 @@ if sys.platform == 'win32':
 try:
     from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                   QHBoxLayout, QLabel, QLineEdit, QPushButton, 
-                                  QComboBox, QTextEdit, QCheckBox, QGroupBox, 
+                                  QComboBox, QTextEdit, QCheckBox, QGroupBox,
+                                  QFrame, QGridLayout, QStackedWidget, QGraphicsOpacityEffect,
                                   QMessageBox, QInputDialog, QSystemTrayIcon, QMenu, QAction,
                                   QScrollArea)
-    from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize
+    from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QPropertyAnimation, QEasingCurve
     from PyQt5.QtGui import QIcon, QTextCursor, QFont
     HAS_PYQT = True
     
@@ -85,7 +86,7 @@ except ImportError:
     print("安装命令: pip3 install PyQt5")
     sys.exit(1)
 
-APP_VERSION = "1.5"
+APP_VERSION = "1.6"
 APP_TITLE = f"ECH Workers 客户端 v{APP_VERSION}"
 
 # 中国IP列表文件名（离线版本，放在程序目录）
@@ -366,6 +367,56 @@ class ProcessThread(QThread):
         return None
 
 
+class LatencyTestThread(QThread):
+    """通过本地代理测试真实 HTTPS 链路耗时。"""
+    result_ready = pyqtSignal(bool, str, str)
+
+    def __init__(self, listen, test_url="https://www.gstatic.com/generate_204"):
+        super().__init__()
+        self.listen = listen
+        self.test_url = test_url
+
+    def run(self):
+        if not self.listen:
+            self.result_ready.emit(False, "监听地址为空", self.test_url)
+            return
+
+        proxy_addr = self.listen if ':' in self.listen else f"127.0.0.1:{self.listen}"
+        curl_bin = "curl.exe" if sys.platform == 'win32' else "curl"
+        cmd = [
+            curl_bin,
+            "--proxy", f"http://{proxy_addr}",
+            "--max-time", "15",
+            "-o", os.devnull,
+            "-sS",
+            "-w", "%{time_appconnect} %{time_starttransfer} %{time_total} %{http_code}",
+            self.test_url,
+        ]
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+            if result.returncode != 0:
+                message = result.stderr.strip() or result.stdout.strip() or "curl 执行失败"
+                self.result_ready.emit(False, message, self.test_url)
+                return
+
+            parts = result.stdout.strip().split()
+            if len(parts) < 4:
+                self.result_ready.emit(False, "无法解析测试结果", self.test_url)
+                return
+
+            tls_time, first_byte, total_time, http_code = parts[:4]
+            tls_ms = int(float(tls_time) * 1000)
+            first_byte_ms = int(float(first_byte) * 1000)
+            total_ms = int(float(total_time) * 1000)
+            message = f"TLS {tls_ms} ms / 首包 {first_byte_ms} ms / 总耗时 {total_ms} ms / HTTP {http_code}"
+            self.result_ready.emit(True, message, self.test_url)
+        except FileNotFoundError:
+            self.result_ready.emit(False, "未找到 curl，无法执行链路测试", self.test_url)
+        except Exception as e:
+            self.result_ready.emit(False, str(e), self.test_url)
+
+
 class MainWindow(QMainWindow):
     """主窗口"""
     
@@ -378,7 +429,7 @@ class MainWindow(QMainWindow):
         self.china_ip_ranges = None  # 缓存中国IP列表
         self.tray_icon = None  # 系统托盘图标
         
-        self.init_ui()
+        self.init_ui_mobile()
         self.init_server_combo()  # 初始化下拉框
         self.load_server_config()
         self.init_tray_icon()  # 初始化系统托盘
@@ -390,15 +441,278 @@ class MainWindow(QMainWindow):
             self.hide()
             QApplication.processEvents()
             self.auto_start()
+
+    def init_ui_mobile(self):
+        """初始化 Stitch 风格的 ECH 功能界面。"""
+        self.setWindowTitle(APP_TITLE)
+        base_width = 420
+        base_height = 760
+
+        try:
+            screen = QApplication.primaryScreen()
+            available_geometry = screen.availableGeometry()
+            screen_width = available_geometry.width()
+            screen_height = available_geometry.height()
+            screen_x = available_geometry.x()
+            screen_y = available_geometry.y()
+            base_width = min(base_width, screen_width - 48)
+            base_height = min(base_height, screen_height - 48)
+            x = screen_x + (screen_width - base_width) // 2
+            y = screen_y + (screen_height - base_height) // 2
+            self.setGeometry(x, y, base_width, base_height)
+        except:
+            self.setGeometry(100, 100, base_width, base_height)
+
+        self.setMinimumSize(380, 620)
+        self.system_proxy_enabled = False
+        self.latency_thread = None
+        self.page_animation = None
+        self.setWindowIcon(self._create_app_icon())
+        self.setStyleSheet(self._get_modern_style())
+
+        central_widget = QWidget()
+        central_widget.setObjectName("appRoot")
+        self.setCentralWidget(central_widget)
+        app_layout = QVBoxLayout(central_widget)
+        app_layout.setSpacing(0)
+        app_layout.setContentsMargins(0, 0, 0, 0)
+
+        header = QFrame()
+        header.setObjectName("mobileHeader")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(18, 8, 18, 8)
+        header_layout.setSpacing(10)
+        brand_icon = QLabel()
+        brand_icon.setPixmap(self._create_app_icon().pixmap(24, 24))
+        header_layout.addWidget(brand_icon)
+        brand_title = QLabel("ECH Workers")
+        brand_title.setObjectName("brandTitle")
+        header_layout.addWidget(brand_title)
+        header_layout.addStretch()
+        self.status_badge = QLabel("Disconnected")
+        self.status_badge.setObjectName("statusBadge")
+        self.status_badge.setProperty("state", "idle")
+        self.status_badge.setAlignment(Qt.AlignCenter)
+        header_layout.addWidget(self.status_badge)
+        app_layout.addWidget(header)
+
+        self.pages = QStackedWidget()
+        self.pages.setObjectName("pageStack")
+        app_layout.addWidget(self.pages, 1)
+
+        home_page = QWidget()
+        home_page.setObjectName("homePage")
+        home_layout = QVBoxLayout(home_page)
+        home_layout.setContentsMargins(22, 30, 22, 22)
+        home_layout.setSpacing(18)
+        home_layout.addStretch(1)
+
+        mode_title = QLabel("Simple Mode")
+        mode_title.setObjectName("homeTitle")
+        mode_title.setAlignment(Qt.AlignCenter)
+        home_layout.addWidget(mode_title)
+
+        self.hero_status_label = QLabel("System Ready")
+        self.hero_status_label.setObjectName("heroTitle")
+        self.hero_status_label.setAlignment(Qt.AlignCenter)
+        home_layout.addWidget(self.hero_status_label)
+
+        self.power_btn = QPushButton("⏻\nTap to Connect")
+        self.power_btn.setObjectName("powerButton")
+        self.power_btn.clicked.connect(self.toggle_connection)
+        home_layout.addWidget(self.power_btn, 0, Qt.AlignCenter)
+
+        selected_card = QFrame()
+        selected_card.setObjectName("selectedServerCard")
+        selected_layout = QHBoxLayout(selected_card)
+        selected_layout.setContentsMargins(14, 12, 14, 12)
+        selected_layout.setSpacing(12)
+        node_icon = QLabel("ECH")
+        node_icon.setObjectName("nodeIcon")
+        node_icon.setAlignment(Qt.AlignCenter)
+        selected_layout.addWidget(node_icon)
+        selected_text = QVBoxLayout()
+        selected_text.setSpacing(2)
+        selected_label = QLabel("Selected Node")
+        selected_label.setObjectName("selectedLabel")
+        self.home_server_name_label = QLabel("默认服务器")
+        self.home_server_name_label.setObjectName("selectedName")
+        selected_text.addWidget(selected_label)
+        selected_text.addWidget(self.home_server_name_label)
+        selected_layout.addLayout(selected_text, 1)
+        selected_arrow = QLabel("⌄")
+        selected_arrow.setObjectName("selectedArrow")
+        selected_layout.addWidget(selected_arrow)
+        home_layout.addWidget(selected_card)
+        home_layout.addStretch(2)
+        self.pages.addWidget(home_page)
+
+        server_page = QWidget()
+        server_outer = QVBoxLayout(server_page)
+        server_outer.setContentsMargins(0, 0, 0, 0)
+        server_outer.setSpacing(0)
+        server_scroll = QScrollArea()
+        server_scroll.setObjectName("pageScroll")
+        server_scroll.setWidgetResizable(True)
+        server_scroll.setFrameShape(QScrollArea.NoFrame)
+        server_content = QWidget()
+        server_content.setObjectName("pageContent")
+        server_layout = QVBoxLayout(server_content)
+        server_layout.setContentsMargins(22, 18, 22, 22)
+        server_layout.setSpacing(14)
+
+        proxy_title = QLabel("服务器管理")
+        proxy_title.setObjectName("pageTitle")
+        server_layout.addWidget(proxy_title)
+        proxy_subtitle = QLabel("Manage and connect to your ECH Workers profiles.")
+        proxy_subtitle.setObjectName("pageSubtitle")
+        server_layout.addWidget(proxy_subtitle)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(10)
+        search_box = QLineEdit()
+        search_box.setPlaceholderText("Search profiles...")
+        search_box.setEnabled(False)
+        action_row.addWidget(search_box, 1)
+        self.latency_btn = QPushButton("测试延迟")
+        self.latency_btn.setObjectName("secondaryButton")
+        self.latency_btn.clicked.connect(self.test_latency)
+        action_row.addWidget(self.latency_btn)
+        server_layout.addLayout(action_row)
+
+        self.summary_latency_label = QLabel("真实链路延迟: 未测试")
+        self.summary_latency_label.setObjectName("latencyLabel")
+        server_layout.addWidget(self.summary_latency_label)
+
+        self.server_cards_layout = QVBoxLayout()
+        self.server_cards_layout.setSpacing(10)
+        server_layout.addLayout(self.server_cards_layout)
+
+        btn_new = QPushButton("+")
+        btn_new.setObjectName("fabButton")
+        btn_new.clicked.connect(self.add_server)
+        server_layout.addWidget(btn_new, 0, Qt.AlignRight)
+
+        config_panel, config_layout = self._create_panel("当前配置", "这里编辑的是选中服务器的真实参数")
+        self.server_combo = QComboBox()
+        self.server_combo.currentIndexChanged.connect(self.on_server_changed)
+        config_layout.addWidget(self.create_label_edit("当前服务器", self.server_combo))
+        self.server_edit = QLineEdit()
+        self.server_edit.setPlaceholderText("例如: your-worker.workers.dev:443")
+        config_layout.addWidget(self.create_label_edit("服务地址", self.server_edit))
+        self.listen_edit = QLineEdit()
+        self.listen_edit.setPlaceholderText("例如: 127.0.0.1:30000")
+        config_layout.addWidget(self.create_label_edit("监听地址", self.listen_edit))
+        self.token_edit = QLineEdit()
+        self.token_edit.setPlaceholderText("身份验证令牌（可选）")
+        self.token_edit.setEchoMode(QLineEdit.Password)
+        config_layout.addWidget(self.create_label_edit("身份令牌", self.token_edit))
+        self.ip_edit = QLineEdit()
+        self.ip_edit.setPlaceholderText("例如: saas.sin.fan")
+        config_layout.addWidget(self.create_label_edit("优选 IP / 域名", self.ip_edit))
+        self.dns_edit = QLineEdit()
+        self.dns_edit.setPlaceholderText("例如: dns.alidns.com/dns-query")
+        config_layout.addWidget(self.create_label_edit("DoH 服务器", self.dns_edit))
+        self.ech_edit = QLineEdit()
+        self.ech_edit.setPlaceholderText("例如: cloudflare-ech.com")
+        config_layout.addWidget(self.create_label_edit("ECH 域名", self.ech_edit))
+        self.routing_combo = QComboBox()
+        self.routing_combo.addItem("全局代理", "global")
+        self.routing_combo.addItem("跳过中国大陆", "bypass_cn")
+        self.routing_combo.addItem("不改变代理", "none")
+        self.routing_combo.currentIndexChanged.connect(self.on_routing_changed)
+        config_layout.addWidget(self.create_label_edit("分流模式", self.routing_combo))
+
+        control_row = QHBoxLayout()
+        control_row.setSpacing(8)
+        self.start_btn = QPushButton("启动")
+        self.start_btn.setObjectName("primaryButton")
+        self.start_btn.clicked.connect(self.start_process)
+        self.stop_btn = QPushButton("停止")
+        self.stop_btn.setObjectName("dangerButton")
+        self.stop_btn.clicked.connect(self.stop_process)
+        self.stop_btn.setEnabled(False)
+        self.proxy_btn = QPushButton("系统代理")
+        self.proxy_btn.setObjectName("secondaryButton")
+        self.proxy_btn.clicked.connect(self.toggle_system_proxy)
+        self.proxy_btn.setEnabled(False)
+        control_row.addWidget(self.start_btn)
+        control_row.addWidget(self.stop_btn)
+        control_row.addWidget(self.proxy_btn)
+        config_layout.addLayout(control_row)
+
+        edit_row = QHBoxLayout()
+        edit_row.setSpacing(8)
+        btn_save = QPushButton("保存")
+        btn_save.setObjectName("secondaryButton")
+        btn_save.clicked.connect(self.save_server)
+        btn_rename = QPushButton("重命名")
+        btn_rename.setObjectName("ghostButton")
+        btn_rename.clicked.connect(self.rename_server)
+        btn_delete = QPushButton("删除")
+        btn_delete.setObjectName("dangerGhostButton")
+        btn_delete.clicked.connect(self.delete_server)
+        edit_row.addWidget(btn_save)
+        edit_row.addWidget(btn_rename)
+        edit_row.addWidget(btn_delete)
+        config_layout.addLayout(edit_row)
+
+        self.auto_start_check = QCheckBox("开机启动")
+        self.auto_start_check.stateChanged.connect(self.on_auto_start_changed)
+        config_layout.addWidget(self.auto_start_check)
+        server_layout.addWidget(config_panel)
+        server_layout.addStretch()
+        server_scroll.setWidget(server_content)
+        server_outer.addWidget(server_scroll)
+        self.pages.addWidget(server_page)
+
+        log_page = QWidget()
+        log_outer = QVBoxLayout(log_page)
+        log_outer.setContentsMargins(22, 18, 22, 22)
+        log_outer.setSpacing(14)
+        log_title = QLabel("Runtime Logs")
+        log_title.setObjectName("pageTitle")
+        log_outer.addWidget(log_title)
+        log_subtitle = QLabel("System activity and connection diagnostics.")
+        log_subtitle.setObjectName("pageSubtitle")
+        log_outer.addWidget(log_subtitle)
+        log_toolbar = QHBoxLayout()
+        log_toolbar.addStretch()
+        btn_clear = QPushButton("清空日志")
+        btn_clear.setObjectName("ghostButton")
+        btn_clear.clicked.connect(self.clear_log)
+        log_toolbar.addWidget(btn_clear)
+        log_outer.addLayout(log_toolbar)
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setMinimumHeight(420)
+        font = QFont("Consolas" if sys.platform == 'win32' else "Monaco" if sys.platform == 'darwin' else "DejaVu Sans Mono", 9)
+        self.log_text.setFont(font)
+        log_outer.addWidget(self.log_text, 1)
+        self.pages.addWidget(log_page)
+
+        bottom_nav = QFrame()
+        bottom_nav.setObjectName("bottomNav")
+        bottom_layout = QHBoxLayout(bottom_nav)
+        bottom_layout.setContentsMargins(12, 8, 12, 8)
+        bottom_layout.setSpacing(6)
+        self.nav_buttons = []
+        for text, index in [("Home", 0), ("Proxies", 1), ("Logs", 2)]:
+            btn = self._create_nav_button(text, index)
+            self.nav_buttons.append(btn)
+            bottom_layout.addWidget(btn, 1)
+        app_layout.addWidget(bottom_nav)
+
+        self._set_current_page(0)
     
     def init_ui(self):
         """初始化界面"""
         self.setWindowTitle(APP_TITLE)
-        
+
         # 使用逻辑像素设置窗口大小，Qt 会根据系统 DPI 转换为物理像素。
-        base_width = 1120
+        base_width = 1160
         base_height = 780
-        
+
         # 获取可用屏幕区域（排除任务栏）
         try:
             screen = QApplication.primaryScreen()
@@ -411,7 +725,7 @@ class MainWindow(QMainWindow):
             # 确保窗口大小不超过可用区域
             base_width = min(base_width, screen_width - 48)
             base_height = min(base_height, screen_height - 48)
-            
+
             # 计算居中位置
             x = screen_x + (screen_width - base_width) // 2
             y = screen_y + (screen_height - base_height) // 2
@@ -419,38 +733,82 @@ class MainWindow(QMainWindow):
         except:
             # 如果获取屏幕信息失败，使用默认位置
             self.setGeometry(100, 100, base_width, base_height)
-        
-        self.setMinimumSize(820, 600)
+
+        self.setMinimumSize(940, 620)
+        self.system_proxy_enabled = False
+        self.latency_thread = None
 
         # 设置窗口图标
         self.setWindowIcon(self._create_app_icon())
-        
+
         # 应用现代深色样式
         self.setStyleSheet(self._get_modern_style())
-        
+
         central_widget = QWidget()
         central_widget.setObjectName("appRoot")
         self.setCentralWidget(central_widget)
-        root_layout = QVBoxLayout(central_widget)
-        root_layout.setSpacing(18)
-        root_layout.setContentsMargins(24, 24, 24, 24)
+        shell_layout = QHBoxLayout(central_widget)
+        shell_layout.setSpacing(0)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
 
-        # 顶部标题和运行状态
-        header = QWidget()
-        header.setObjectName("headerPanel")
+        # 左侧导航
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(18, 22, 18, 18)
+        sidebar_layout.setSpacing(14)
+
+        brand_row = QHBoxLayout()
+        brand_row.setSpacing(10)
+        brand_icon = QLabel()
+        brand_icon.setPixmap(self._create_app_icon().pixmap(32, 32))
+        brand_row.addWidget(brand_icon)
+        brand_title = QLabel("ECH Workers")
+        brand_title.setObjectName("brandTitle")
+        brand_row.addWidget(brand_title)
+        brand_row.addStretch()
+        sidebar_layout.addLayout(brand_row)
+
+        brand_subtitle = QLabel("Encrypted Client Helper")
+        brand_subtitle.setObjectName("brandSubtitle")
+        sidebar_layout.addWidget(brand_subtitle)
+
+        self.nav_buttons = []
+        nav_items = [("首页", 0), ("服务器", 1), ("日志", 2), ("设置", 3)]
+        for text, index in nav_items:
+            btn = self._create_nav_button(text, index)
+            self.nav_buttons.append(btn)
+            sidebar_layout.addWidget(btn)
+        sidebar_layout.addStretch()
+
+        sidebar_hint = QLabel("所有信息均来自当前 ECH Workers 配置。")
+        sidebar_hint.setObjectName("sidebarHint")
+        sidebar_hint.setWordWrap(True)
+        sidebar_layout.addWidget(sidebar_hint)
+        shell_layout.addWidget(sidebar)
+
+        # 右侧内容区
+        content = QWidget()
+        content.setObjectName("contentArea")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(24, 22, 24, 22)
+        content_layout.setSpacing(18)
+
+        header = QFrame()
+        header.setObjectName("contentHeader")
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(20, 16, 20, 16)
+        header_layout.setContentsMargins(18, 14, 18, 14)
         header_layout.setSpacing(16)
 
-        title_layout = QVBoxLayout()
-        title_layout.setSpacing(3)
-        title = QLabel("ECH Workers")
+        title_stack = QVBoxLayout()
+        title_stack.setSpacing(2)
+        title = QLabel("ECH 控制台")
         title.setObjectName("appTitle")
-        subtitle = QLabel("安全、轻量的 ECH 代理客户端")
+        subtitle = QLabel("启动代理、管理 Workers 配置、测试真实 HTTPS 链路")
         subtitle.setObjectName("appSubtitle")
-        title_layout.addWidget(title)
-        title_layout.addWidget(subtitle)
-        header_layout.addLayout(title_layout)
+        title_stack.addWidget(title)
+        title_stack.addWidget(subtitle)
+        header_layout.addLayout(title_stack)
         header_layout.addStretch()
 
         self.status_badge = QLabel("未运行")
@@ -458,31 +816,83 @@ class MainWindow(QMainWindow):
         self.status_badge.setProperty("state", "idle")
         self.status_badge.setAlignment(Qt.AlignCenter)
         header_layout.addWidget(self.status_badge)
-        root_layout.addWidget(header)
+        content_layout.addWidget(header)
 
-        # 内容区可滚动，避免小屏幕或高缩放比例下控件被裁切。
-        scroll_area = QScrollArea()
-        scroll_area.setObjectName("contentScroll")
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QScrollArea.NoFrame)
+        self.pages = QStackedWidget()
+        self.pages.setObjectName("pageStack")
+        content_layout.addWidget(self.pages, 1)
+        shell_layout.addWidget(content, 1)
 
-        content_widget = QWidget()
-        content_widget.setObjectName("contentWidget")
-        layout = QVBoxLayout(content_widget)
-        layout.setSpacing(16)
-        layout.setContentsMargins(0, 0, 0, 0)
-        
-        # 服务器管理
-        server_group = QGroupBox("服务器配置")
-        server_layout = QHBoxLayout()
-        server_layout.setSpacing(8)
+        # 首页：真实控制与当前配置摘要
+        home_page = QWidget()
+        home_layout = QVBoxLayout(home_page)
+        home_layout.setContentsMargins(0, 0, 0, 0)
+        home_layout.setSpacing(16)
+
+        hero_panel, hero_layout = self._create_panel("连接中心", "使用当前服务器配置启动 ECH Workers 本地代理")
+        self.hero_status_label = QLabel("系统就绪")
+        self.hero_status_label.setObjectName("heroTitle")
+        self.hero_detail_label = QLabel("填写服务地址和监听地址后即可启动代理。")
+        self.hero_detail_label.setObjectName("heroDetail")
+        self.hero_detail_label.setWordWrap(True)
+        hero_layout.addWidget(self.hero_status_label)
+        hero_layout.addWidget(self.hero_detail_label)
+
+        hero_buttons = QHBoxLayout()
+        hero_buttons.setSpacing(10)
+        self.start_btn = QPushButton("启动代理")
+        self.start_btn.setObjectName("primaryButton")
+        self.start_btn.clicked.connect(self.start_process)
+        self.stop_btn = QPushButton("停止")
+        self.stop_btn.setObjectName("dangerButton")
+        self.stop_btn.clicked.connect(self.stop_process)
+        self.stop_btn.setEnabled(False)
+        self.latency_btn = QPushButton("测试真实链路")
+        self.latency_btn.setObjectName("secondaryButton")
+        self.latency_btn.clicked.connect(self.test_latency)
+        hero_buttons.addWidget(self.start_btn, 1)
+        hero_buttons.addWidget(self.stop_btn, 1)
+        hero_buttons.addWidget(self.latency_btn, 1)
+        hero_layout.addLayout(hero_buttons)
+        home_layout.addWidget(hero_panel)
+
+        metrics_grid = QGridLayout()
+        metrics_grid.setSpacing(12)
+        server_card, self.summary_server_label = self._create_metric_card("当前服务器", "未配置")
+        listen_card, self.summary_listen_label = self._create_metric_card("监听地址", "127.0.0.1:30000")
+        routing_card, self.summary_routing_label = self._create_metric_card("分流模式", "跳过中国大陆")
+        latency_card, self.summary_latency_label = self._create_metric_card("真实链路延迟", "未测试")
+        metrics_grid.addWidget(server_card, 0, 0)
+        metrics_grid.addWidget(listen_card, 0, 1)
+        metrics_grid.addWidget(routing_card, 1, 0)
+        metrics_grid.addWidget(latency_card, 1, 1)
+        home_layout.addLayout(metrics_grid)
+
+        notes_panel, notes_layout = self._create_panel("当前 ECH 配置", "这里展示的是实际会传给 ech-workers 的参数")
+        self.summary_target_label = QLabel("服务地址: -\n优选 IP / 域名: -\nDoH 服务器: -\nECH 域名: -")
+        self.summary_target_label.setObjectName("monoInfo")
+        self.summary_target_label.setWordWrap(True)
+        notes_layout.addWidget(self.summary_target_label)
+        home_layout.addWidget(notes_panel)
+        home_layout.addStretch()
+        self.pages.addWidget(home_page)
+
+        # 服务器页：真实配置项
+        server_page = QWidget()
+        server_page_layout = QVBoxLayout(server_page)
+        server_page_layout.setContentsMargins(0, 0, 0, 0)
+        server_page_layout.setSpacing(16)
+
+        server_panel, server_layout = self._create_panel("服务器配置", "管理当前 Workers 服务地址和连接参数")
+        server_select_row = QHBoxLayout()
+        server_select_row.setSpacing(10)
         server_label = QLabel("当前服务器")
         server_label.setObjectName("fieldLabel")
-        server_layout.addWidget(server_label)
+        server_select_row.addWidget(server_label)
         self.server_combo = QComboBox()
         self.server_combo.currentIndexChanged.connect(self.on_server_changed)
-        server_layout.addWidget(self.server_combo, 1)
-        
+        server_select_row.addWidget(self.server_combo, 1)
+
         btn_new = QPushButton("新增")
         btn_new.setObjectName("ghostButton")
         btn_new.clicked.connect(self.add_server)
@@ -495,43 +905,24 @@ class MainWindow(QMainWindow):
         btn_delete = QPushButton("删除")
         btn_delete.setObjectName("dangerGhostButton")
         btn_delete.clicked.connect(self.delete_server)
-        
-        server_layout.addWidget(btn_new)
-        server_layout.addWidget(btn_save)
-        server_layout.addWidget(btn_rename)
-        server_layout.addWidget(btn_delete)
-        server_group.setLayout(server_layout)
-        layout.addWidget(server_group)
+        server_select_row.addWidget(btn_new)
+        server_select_row.addWidget(btn_save)
+        server_select_row.addWidget(btn_rename)
+        server_select_row.addWidget(btn_delete)
+        server_layout.addLayout(server_select_row)
 
-        body_layout = QHBoxLayout()
-        body_layout.setSpacing(16)
-        layout.addLayout(body_layout, 1)
-
-        left_column = QVBoxLayout()
-        left_column.setSpacing(16)
-        body_layout.addLayout(left_column, 5)
-
-        right_column = QVBoxLayout()
-        right_column.setSpacing(16)
-        body_layout.addLayout(right_column, 4)
-        
         # 核心配置
-        core_group = QGroupBox("核心配置")
-        core_layout = QVBoxLayout()
-        core_layout.setSpacing(10)
+        core_panel, core_layout = self._create_panel("核心配置", "这两项决定代理入口和 Workers 后端")
         self.server_edit = QLineEdit()
         self.server_edit.setPlaceholderText("例如: your-worker.workers.dev:443")
         core_layout.addWidget(self.create_label_edit("服务地址", self.server_edit))
         self.listen_edit = QLineEdit()
         self.listen_edit.setPlaceholderText("例如: 127.0.0.1:30000")
         core_layout.addWidget(self.create_label_edit("监听地址", self.listen_edit))
-        core_group.setLayout(core_layout)
-        left_column.addWidget(core_group)
-        
+        server_layout.addWidget(core_panel)
+
         # 高级选项
-        advanced_group = QGroupBox("高级选项")
-        advanced_layout = QVBoxLayout()
-        advanced_layout.setSpacing(10)
+        advanced_panel, advanced_layout = self._create_panel("高级选项", "令牌、优选地址、DoH 和 ECH 域名")
         self.token_edit = QLineEdit()
         self.token_edit.setPlaceholderText("身份验证令牌（可选）")
         self.token_edit.setEchoMode(QLineEdit.Password)
@@ -545,68 +936,22 @@ class MainWindow(QMainWindow):
         self.ech_edit = QLineEdit()
         self.ech_edit.setPlaceholderText("例如: cloudflare-ech.com")
         advanced_layout.addWidget(self.create_label_edit("ECH 域名", self.ech_edit))
-        advanced_group.setLayout(advanced_layout)
-        left_column.addWidget(advanced_group)
-        left_column.addStretch()
-        
-        # 分流设置
-        routing_group = QGroupBox("分流设置")
-        routing_layout = QVBoxLayout()
-        routing_layout.setSpacing(8)
-        routing_label = QLabel("代理模式")
-        routing_label.setObjectName("fieldLabel")
-        routing_layout.addWidget(routing_label)
-        self.routing_combo = QComboBox()
-        self.routing_combo.addItem("全局代理", "global")
-        self.routing_combo.addItem("🇨🇳 跳过中国大陆", "bypass_cn")
-        self.routing_combo.addItem("不改变代理", "none")
-        self.routing_combo.currentIndexChanged.connect(self.on_routing_changed)
-        routing_layout.addWidget(self.routing_combo)
-        routing_group.setLayout(routing_layout)
-        right_column.addWidget(routing_group)
-        
-        # 控制按钮
-        control_group = QGroupBox("连接控制")
-        control_layout = QVBoxLayout()
-        control_layout.setSpacing(10)
-        control_hint = QLabel("启动代理后，可以将当前监听地址应用为系统代理。")
-        control_hint.setObjectName("mutedLabel")
-        control_hint.setWordWrap(True)
-        control_layout.addWidget(control_hint)
+        server_layout.addWidget(advanced_panel)
+        server_page_layout.addWidget(server_panel)
+        server_page_layout.addStretch()
+        self.pages.addWidget(server_page)
 
-        process_button_layout = QHBoxLayout()
-        process_button_layout.setSpacing(8)
-        self.start_btn = QPushButton("启动代理")
-        self.start_btn.setObjectName("primaryButton")
-        self.start_btn.clicked.connect(self.start_process)
-        self.stop_btn = QPushButton("停止")
-        self.stop_btn.setObjectName("dangerButton")
-        self.stop_btn.clicked.connect(self.stop_process)
-        self.stop_btn.setEnabled(False)
-        process_button_layout.addWidget(self.start_btn, 1)
-        process_button_layout.addWidget(self.stop_btn, 1)
-        control_layout.addLayout(process_button_layout)
-
-        self.proxy_btn = QPushButton("设置系统代理")
-        self.proxy_btn.setObjectName("secondaryButton")
-        self.proxy_btn.clicked.connect(self.toggle_system_proxy)
-        self.proxy_btn.setEnabled(False)  # 只有启动后才能设置
-        control_layout.addWidget(self.proxy_btn)
-
-        self.auto_start_check = QCheckBox("开机启动")
-        self.auto_start_check.stateChanged.connect(self.on_auto_start_changed)
-        control_layout.addWidget(self.auto_start_check)
-        control_group.setLayout(control_layout)
-        right_column.addWidget(control_group)
-        
-        # 系统代理状态
-        self.system_proxy_enabled = False
-        
-        # 日志
-        log_group = QGroupBox("运行日志")
-        log_layout = QVBoxLayout()
-        log_layout.setSpacing(8)
+        # 日志页
+        log_page = QWidget()
+        log_layout_outer = QVBoxLayout(log_page)
+        log_layout_outer.setContentsMargins(0, 0, 0, 0)
+        log_layout_outer.setSpacing(16)
+        log_panel, log_layout = self._create_panel("运行日志", "ech-workers 的真实运行输出和错误信息")
         log_toolbar = QHBoxLayout()
+        log_toolbar.setSpacing(10)
+        log_hint = QLabel("INFO / WARN / ERROR 会直接来自进程输出。")
+        log_hint.setObjectName("mutedLabel")
+        log_toolbar.addWidget(log_hint)
         log_toolbar.addStretch()
         btn_clear = QPushButton("清空日志")
         btn_clear.setObjectName("ghostButton")
@@ -616,17 +961,242 @@ class MainWindow(QMainWindow):
 
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setMinimumHeight(220)
-        # 使用等宽字体，更适合日志显示
-        from PyQt5.QtGui import QFont
+        self.log_text.setMinimumHeight(420)
         font = QFont("Consolas" if sys.platform == 'win32' else "Monaco" if sys.platform == 'darwin' else "DejaVu Sans Mono", 9)
         self.log_text.setFont(font)
-        log_layout.addWidget(self.log_text)
-        log_group.setLayout(log_layout)
-        right_column.addWidget(log_group, 1)
+        log_layout.addWidget(self.log_text, 1)
+        log_layout_outer.addWidget(log_panel, 1)
+        self.pages.addWidget(log_page)
 
-        scroll_area.setWidget(content_widget)
-        root_layout.addWidget(scroll_area, 1)
+        # 设置页
+        settings_page = QWidget()
+        settings_layout = QVBoxLayout(settings_page)
+        settings_layout.setContentsMargins(0, 0, 0, 0)
+        settings_layout.setSpacing(16)
+
+        routing_panel, routing_layout = self._create_panel("分流与系统代理", "这些选项会影响系统代理和 ech-workers 的路由行为")
+        self.routing_combo = QComboBox()
+        self.routing_combo.addItem("全局代理", "global")
+        self.routing_combo.addItem("跳过中国大陆", "bypass_cn")
+        self.routing_combo.addItem("不改变代理", "none")
+        self.routing_combo.currentIndexChanged.connect(self.on_routing_changed)
+        routing_layout.addWidget(self.create_label_edit("分流模式", self.routing_combo))
+        self.proxy_btn = QPushButton("设置系统代理")
+        self.proxy_btn.setObjectName("secondaryButton")
+        self.proxy_btn.clicked.connect(self.toggle_system_proxy)
+        self.proxy_btn.setEnabled(False)  # 只有启动后才能设置
+        routing_layout.addWidget(self.proxy_btn)
+        proxy_hint = QLabel("系统代理只负责把流量交给本地端口；国内外分流由 ech-workers 内部处理。")
+        proxy_hint.setObjectName("mutedLabel")
+        proxy_hint.setWordWrap(True)
+        routing_layout.addWidget(proxy_hint)
+        settings_layout.addWidget(routing_panel)
+
+        behavior_panel, behavior_layout = self._create_panel("启动行为", "开机启动和辅助选项")
+        self.auto_start_check = QCheckBox("开机启动")
+        self.auto_start_check.stateChanged.connect(self.on_auto_start_changed)
+        behavior_layout.addWidget(self.auto_start_check)
+        behavior_note = QLabel("开机启动会自动运行 GUI；如果配置完整，会继续启动本地代理。")
+        behavior_note.setObjectName("mutedLabel")
+        behavior_note.setWordWrap(True)
+        behavior_layout.addWidget(behavior_note)
+        settings_layout.addWidget(behavior_panel)
+        settings_layout.addStretch()
+        self.pages.addWidget(settings_page)
+
+        self._set_current_page(0)
+
+    def _create_nav_button(self, text, page_index):
+        """创建侧边栏导航按钮。"""
+        button = QPushButton(text)
+        button.setObjectName("navButton")
+        button.setProperty("active", False)
+        button.clicked.connect(lambda: self._set_current_page(page_index))
+        return button
+
+    def _create_panel(self, title, subtitle=None):
+        """创建卡片面板。"""
+        panel = QFrame()
+        panel.setObjectName("cardPanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(18, 16, 18, 18)
+        layout.setSpacing(10)
+
+        title_label = QLabel(title)
+        title_label.setObjectName("panelTitle")
+        layout.addWidget(title_label)
+
+        if subtitle:
+            subtitle_label = QLabel(subtitle)
+            subtitle_label.setObjectName("panelSubtitle")
+            subtitle_label.setWordWrap(True)
+            layout.addWidget(subtitle_label)
+
+        return panel, layout
+
+    def _create_metric_card(self, title, value):
+        """创建首页摘要卡。"""
+        card = QFrame()
+        card.setObjectName("metricCard")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(6)
+
+        title_label = QLabel(title)
+        title_label.setObjectName("metricLabel")
+        value_label = QLabel(value)
+        value_label.setObjectName("metricValue")
+        value_label.setWordWrap(True)
+        layout.addWidget(title_label)
+        layout.addWidget(value_label)
+        return card, value_label
+
+    def _create_server_card(self, server):
+        """创建服务器列表卡片，内容来自真实配置。"""
+        current = self.config_manager.get_current_server()
+        selected = bool(current and server.get('id') == current.get('id'))
+        name = server.get('name') or '未命名服务器'
+        server_addr = server.get('server') or '未设置服务地址'
+        listen = server.get('listen') or '未设置监听地址'
+        routing = self._routing_text(server.get('routing_mode'))
+
+        card = QPushButton()
+        card.setObjectName("serverCard")
+        card.setProperty("selected", selected)
+        card.setText(f"{name}\n{server_addr}\n监听 {listen} · {routing}")
+        card.setCheckable(True)
+        card.setChecked(selected)
+        card.clicked.connect(lambda: self._select_server_from_card(server.get('id')))
+        return card
+
+    def _clear_layout(self, layout):
+        """清空布局中的控件。"""
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+
+    def _refresh_server_cards(self):
+        """刷新服务器管理页卡片列表。"""
+        if not hasattr(self, 'server_cards_layout'):
+            return
+        self._clear_layout(self.server_cards_layout)
+        for server in sorted(self.config_manager.servers, key=lambda x: x.get('name', '')):
+            self.server_cards_layout.addWidget(self._create_server_card(server))
+
+    def _select_server_from_card(self, server_id):
+        """从服务器卡片切换当前配置。"""
+        if not server_id:
+            return
+        if self.process_thread and self.process_thread.is_running:
+            QMessageBox.warning(self, "提示", "请先停止当前连接后再切换服务器")
+            return
+        for i in range(self.server_combo.count()):
+            if self.server_combo.itemData(i) == server_id:
+                self.server_combo.setCurrentIndex(i)
+                break
+
+    def toggle_connection(self):
+        """主页大按钮：未运行时启动，运行时停止。"""
+        if self.process_thread and self.process_thread.is_running:
+            self.stop_process()
+        else:
+            if hasattr(self, 'power_btn'):
+                self.power_btn.setText("⏻\nConnecting...")
+                self.power_btn.setEnabled(False)
+            self.start_process()
+
+    def _set_current_page(self, index):
+        """切换主内容页并刷新导航态。"""
+        self.pages.setCurrentIndex(index)
+        self._fade_in_current_page()
+        for i, button in enumerate(self.nav_buttons):
+            button.setProperty("active", i == index)
+            button.style().unpolish(button)
+            button.style().polish(button)
+
+    def _fade_in_current_page(self):
+        """当前页面淡入，提升切换手感。"""
+        page = self.pages.currentWidget()
+        if not page:
+            return
+
+        effect = QGraphicsOpacityEffect(page)
+        page.setGraphicsEffect(effect)
+
+        animation = QPropertyAnimation(effect, b"opacity", self)
+        animation.setDuration(160)
+        animation.setStartValue(0.0)
+        animation.setEndValue(1.0)
+        animation.setEasingCurve(QEasingCurve.OutCubic)
+        animation.finished.connect(lambda: page.setGraphicsEffect(None))
+        self.page_animation = animation
+        animation.start()
+
+    def _routing_text(self, mode):
+        """将路由模式转成面向用户的文案。"""
+        return {
+            'global': '全局代理',
+            'bypass_cn': '跳过中国大陆',
+            'none': '不改变代理',
+        }.get(mode or 'bypass_cn', '跳过中国大陆')
+
+    def _update_dashboard_summary(self):
+        """同步首页摘要中的真实配置。"""
+        if not hasattr(self, 'server_edit'):
+            return
+
+        server = self.get_control_values()
+        name = server.get('name', '未配置')
+        listen = server.get('listen') or '未设置'
+        routing = self._routing_text(server.get('routing_mode'))
+        server_addr = server.get('server') or '未设置'
+        ip = server.get('ip') or '未设置'
+        dns = server.get('dns') or '未设置'
+        ech = server.get('ech') or '未设置'
+
+        if hasattr(self, 'home_server_name_label'):
+            self.home_server_name_label.setText(name)
+        if hasattr(self, 'summary_server_label'):
+            self.summary_server_label.setText(name)
+            self.summary_listen_label.setText(listen)
+            self.summary_routing_label.setText(routing)
+        if hasattr(self, 'summary_target_label'):
+            self.summary_target_label.setText(
+                f"服务地址: {server_addr}\n"
+                f"优选 IP / 域名: {ip}\n"
+                f"DoH 服务器: {dns}\n"
+                f"ECH 域名: {ech}"
+            )
+        self._refresh_server_cards()
+
+    def test_latency(self):
+        """通过当前本地代理测试真实 HTTPS 链路。"""
+        if not (self.process_thread and self.process_thread.is_running):
+            QMessageBox.information(self, "提示", "请先启动代理，再测试真实链路延迟")
+            return
+
+        listen = self.listen_edit.text().strip()
+        self.latency_btn.setEnabled(False)
+        self.latency_btn.setText("测试中...")
+        self.summary_latency_label.setText("测试中...")
+        self.append_log("[测速] 开始测试真实 HTTPS 链路: https://www.gstatic.com/generate_204\n")
+
+        self.latency_thread = LatencyTestThread(listen)
+        self.latency_thread.result_ready.connect(self.on_latency_test_finished)
+        self.latency_thread.start()
+
+    def on_latency_test_finished(self, success, message, test_url):
+        """处理链路测试结果。"""
+        self.latency_btn.setEnabled(True)
+        self.latency_btn.setText("测试延迟")
+        if success:
+            self.summary_latency_label.setText(message)
+            self.append_log(f"[测速] {test_url} -> {message}\n")
+        else:
+            self.summary_latency_label.setText("测试失败")
+            self.append_log(f"[测速] 测试失败: {message}\n")
     
     def _create_app_icon(self):
         """加载应用图标，优先使用打包后的可执行文件图标。"""
@@ -1208,6 +1778,272 @@ class MainWindow(QMainWindow):
         QScrollBar::handle:horizontal:hover {
             background-color: #475569;
         }
+
+        /* Stitch-style ECH functional shell */
+        QWidget#appRoot {
+            background-color: #0b0e16;
+        }
+
+        QFrame#mobileHeader {
+            background-color: #11131b;
+            border-bottom: 1px solid #2a3340;
+        }
+
+        QLabel#brandTitle {
+            color: #f4f7ff;
+            font-size: 18px;
+            font-weight: 700;
+        }
+
+        QStackedWidget#pageStack,
+        QWidget#homePage,
+        QWidget#pageContent {
+            background-color: #0b0e16;
+        }
+
+        QScrollArea#pageScroll {
+            background-color: transparent;
+            border: none;
+        }
+
+        QLabel#statusBadge {
+            color: #c7d4dd;
+            background-color: #191d29;
+            border: 1px solid #232a36;
+            border-radius: 7px;
+            padding: 5px 11px;
+            font-size: 12px;
+            font-weight: 700;
+            min-width: 86px;
+        }
+
+        QLabel#statusBadge[state="running"] {
+            color: #7df4ff;
+            background-color: #092a31;
+            border: 1px solid #00dbe9;
+        }
+
+        QLabel#homeTitle {
+            color: #f4f7ff;
+            font-size: 30px;
+            font-weight: 800;
+        }
+
+        QLabel#heroTitle {
+            color: #d7f8ff;
+            font-size: 16px;
+            font-weight: 700;
+        }
+
+        QPushButton#powerButton {
+            color: #d7f8ff;
+            background-color: #1a1d2a;
+            border: 1px solid #232b3a;
+            border-radius: 28px;
+            min-width: 150px;
+            max-width: 150px;
+            min-height: 130px;
+            max-height: 130px;
+            font-size: 18px;
+            font-weight: 800;
+            padding: 12px;
+        }
+
+        QPushButton#powerButton:hover {
+            background-color: #202433;
+            border: 1px solid #00dbe9;
+            color: #7df4ff;
+        }
+
+        QPushButton#powerButton[running="true"] {
+            background-color: #082a31;
+            border: 1px solid #00dbe9;
+            color: #7df4ff;
+        }
+
+        QFrame#selectedServerCard {
+            background-color: #151824;
+            border: 1px solid #273142;
+            border-radius: 9px;
+        }
+
+        QLabel#nodeIcon {
+            color: #7df4ff;
+            background-color: #202733;
+            border: 1px solid #334252;
+            border-radius: 18px;
+            min-width: 36px;
+            max-width: 36px;
+            min-height: 36px;
+            max-height: 36px;
+            font-size: 10px;
+            font-weight: 800;
+        }
+
+        QLabel#selectedLabel,
+        QLabel#metricLabel {
+            color: #aab8c2;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 1px;
+        }
+
+        QLabel#selectedName {
+            color: #f4f7ff;
+            font-size: 15px;
+            font-weight: 800;
+        }
+
+        QLabel#selectedArrow {
+            color: #b9cacb;
+            font-size: 24px;
+            font-weight: 700;
+        }
+
+        QLabel#pageTitle {
+            color: #f4f7ff;
+            font-size: 30px;
+            font-weight: 800;
+        }
+
+        QLabel#pageSubtitle,
+        QLabel#panelSubtitle,
+        QLabel#mutedLabel,
+        QLabel#latencyLabel {
+            color: #b9cacb;
+            font-size: 13px;
+        }
+
+        QPushButton#serverCard {
+            color: #d9deee;
+            background-color: #171a26;
+            border: 1px solid #232a36;
+            border-radius: 14px;
+            padding: 14px 18px;
+            min-height: 74px;
+            text-align: left;
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+        QPushButton#serverCard[selected="true"] {
+            color: #f4f7ff;
+            border: 1px solid #00dbe9;
+            background-color: #171b29;
+        }
+
+        QPushButton#fabButton {
+            color: #002022;
+            background-color: #00dbe9;
+            border: none;
+            border-radius: 24px;
+            min-width: 48px;
+            max-width: 48px;
+            min-height: 48px;
+            max-height: 48px;
+            font-size: 24px;
+            font-weight: 500;
+        }
+
+        QFrame#cardPanel,
+        QFrame#metricCard {
+            background-color: #151824;
+            border: 1px solid #273142;
+            border-radius: 12px;
+        }
+
+        QLabel#panelTitle {
+            color: #dbfcff;
+            font-size: 13px;
+            font-weight: 800;
+            letter-spacing: 1px;
+        }
+
+        QLabel#fieldLabel {
+            color: #d7e3ea;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        QLineEdit,
+        QComboBox {
+            color: #f4f7ff;
+            background-color: #11131b;
+            border: 1px solid #303847;
+            border-radius: 9px;
+            padding: 8px 10px;
+            font-size: 13px;
+        }
+
+        QLineEdit:focus,
+        QComboBox:focus {
+            border: 1px solid #00dbe9;
+        }
+
+        QPushButton#primaryButton,
+        QPushButton#secondaryButton,
+        QPushButton#ghostButton,
+        QPushButton#dangerButton,
+        QPushButton#dangerGhostButton {
+            border-radius: 10px;
+            padding: 8px 10px;
+            min-width: 0px;
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+        QPushButton#primaryButton,
+        QPushButton#secondaryButton {
+            color: #7df4ff;
+            background-color: #1b202c;
+            border: 1px solid #2b3545;
+        }
+
+        QPushButton#primaryButton:hover,
+        QPushButton#secondaryButton:hover {
+            border: 1px solid #00dbe9;
+        }
+
+        QPushButton#ghostButton {
+            color: #d7e3ea;
+            background-color: #151824;
+            border: 1px solid #273142;
+        }
+
+        QPushButton#dangerButton,
+        QPushButton#dangerGhostButton {
+            color: #ffb3af;
+            background-color: #25151a;
+            border: 1px solid #673039;
+        }
+
+        QTextEdit {
+            color: #d7e3ea;
+            background-color: #080b12;
+            border: 1px solid #273142;
+            border-radius: 12px;
+            padding: 12px;
+            font-size: 12px;
+        }
+
+        QFrame#bottomNav {
+            background-color: #262a33;
+            border-top: 1px solid #3b424c;
+        }
+
+        QPushButton#navButton {
+            color: #8f9ba4;
+            background-color: transparent;
+            border: none;
+            border-radius: 8px;
+            padding: 7px 4px;
+            font-size: 12px;
+            font-weight: 800;
+        }
+
+        QPushButton#navButton[active="true"] {
+            color: #7df4ff;
+        }
         """
     
     def init_tray_icon(self):
@@ -1455,10 +2291,25 @@ class MainWindow(QMainWindow):
 
     def _set_running_status(self, running):
         """更新顶部运行状态。"""
-        self.status_badge.setText("运行中" if running else "未运行")
+        self.status_badge.setText("Connected" if running else "Disconnected")
         self.status_badge.setProperty("state", "running" if running else "idle")
         self.status_badge.style().unpolish(self.status_badge)
         self.status_badge.style().polish(self.status_badge)
+        if hasattr(self, 'hero_status_label'):
+            self.hero_status_label.setText("ECH Workers Active" if running else "System Ready")
+        if hasattr(self, 'hero_detail_label'):
+            self.hero_detail_label.setText(
+                "本地代理已启动，可以设置系统代理或测试真实链路。"
+                if running else
+                "填写服务地址和监听地址后即可启动代理。"
+            )
+        if hasattr(self, 'power_btn'):
+            self.power_btn.setText("⏻\nTap to Disconnect" if running else "⏻\nTap to Connect")
+            self.power_btn.setEnabled(True)
+            self.power_btn.setProperty("running", running)
+            self.power_btn.style().unpolish(self.power_btn)
+            self.power_btn.style().polish(self.power_btn)
+        self._update_dashboard_summary()
     
     def init_server_combo(self):
         """初始化服务器下拉框（首次加载）"""
@@ -1483,6 +2334,7 @@ class MainWindow(QMainWindow):
         
         # 重新连接信号
         self.server_combo.currentIndexChanged.connect(self.on_server_changed)
+        self._refresh_server_cards()
     
     def load_server_config(self):
         """加载服务器配置"""
@@ -1501,6 +2353,7 @@ class MainWindow(QMainWindow):
                 if self.routing_combo.itemData(i) == routing_mode:
                     self.routing_combo.setCurrentIndex(i)
                     break
+            self._update_dashboard_summary()
     
     def refresh_server_combo(self):
         """刷新服务器下拉框"""
@@ -1548,6 +2401,7 @@ class MainWindow(QMainWindow):
         
         # 重新连接信号
         self.server_combo.currentIndexChanged.connect(self.on_server_changed)
+        self._refresh_server_cards()
     
     def get_control_values(self):
         """获取界面输入值"""
@@ -1623,6 +2477,8 @@ class MainWindow(QMainWindow):
                 self.server_combo.currentIndexChanged.connect(self.on_server_changed)
                 # 保存配置
                 self.config_manager.save_config()
+                self._update_dashboard_summary()
+                self._refresh_server_cards()
     
     def add_server(self):
         """添加服务器"""
@@ -1657,6 +2513,8 @@ class MainWindow(QMainWindow):
                     break
             self.load_server_config()
             self.append_log(f"[系统] 已添加新服务器: {name}\n")
+            self._update_dashboard_summary()
+            self._refresh_server_cards()
     
     def save_server(self):
         """保存服务器配置"""
@@ -1665,6 +2523,8 @@ class MainWindow(QMainWindow):
             self.config_manager.update_server(server)
             self.config_manager.save_config()
             self.append_log(f"[系统] 服务器 \"{server['name']}\" 配置已保存\n")
+            self._update_dashboard_summary()
+            self._refresh_server_cards()
     
     def delete_server(self):
         """删除服务器"""
@@ -1691,6 +2551,8 @@ class MainWindow(QMainWindow):
                 self.load_server_config()
                 
                 self.append_log(f"[系统] 已删除服务器: {name}\n")
+                self._update_dashboard_summary()
+                self._refresh_server_cards()
     
     def rename_server(self):
         """重命名服务器"""
@@ -1709,16 +2571,24 @@ class MainWindow(QMainWindow):
                 self.config_manager.save_config()
                 self.refresh_server_combo()
                 self.append_log(f"[系统] 服务器已重命名: {old_name} -> {new_name}\n")
+                self._update_dashboard_summary()
+                self._refresh_server_cards()
     
     def start_process(self):
         """启动进程"""
         server = self.get_control_values()
         
         if not server.get('server'):
+            if hasattr(self, 'power_btn'):
+                self.power_btn.setText("⏻\nTap to Connect")
+                self.power_btn.setEnabled(True)
             QMessageBox.warning(self, "提示", "请输入服务地址")
             return
         
         if not server.get('listen'):
+            if hasattr(self, 'power_btn'):
+                self.power_btn.setText("⏻\nTap to Connect")
+                self.power_btn.setEnabled(True)
             QMessageBox.warning(self, "提示", "请输入监听地址")
             return
         
@@ -1738,6 +2608,7 @@ class MainWindow(QMainWindow):
         self.listen_edit.setEnabled(False)
         self.server_combo.setEnabled(False)
         self.append_log(f"[系统] 已启动服务器: {server['name']}\n")
+        self._update_dashboard_summary()
         
         # 如果中国IP列表未加载，尝试加载（从离线文件）
         if self.china_ip_ranges is None:
@@ -1767,6 +2638,7 @@ class MainWindow(QMainWindow):
         self.listen_edit.setEnabled(True)
         self.server_combo.setEnabled(True)
         self.append_log("[系统] 进程已停止。\n")
+        self._update_dashboard_summary()
     
     def on_auto_start_changed(self):
         """开机启动改变"""
@@ -1919,6 +2791,11 @@ class MainWindow(QMainWindow):
     def append_log(self, text):
         """追加日志"""
         self.log_text.append(text)
+        try:
+            scrollbar = self.log_text.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+        except:
+            pass
         # 限制日志长度（使用更安全的方式，避免 QTextCursor 信号问题）
         if self.log_text.document().blockCount() > 1000:
             try:
@@ -1956,11 +2833,15 @@ class MainWindow(QMainWindow):
                     self.system_proxy_enabled = False
                     self.proxy_btn.setText("设置系统代理")
                     self.append_log("[系统] 分流模式已切换为\"不改变代理\"，已关闭系统代理\n")
+                    self._update_dashboard_summary()
             else:
                 # 重新设置系统代理以应用新的绕过规则
                 if self._set_system_proxy(True):
                     mode_name = self.routing_combo.currentText()
                     self.append_log(f"[系统] 分流模式已切换为\"{mode_name}\"，已更新系统代理设置\n")
+                    self._update_dashboard_summary()
+        else:
+            self._update_dashboard_summary()
     
     def toggle_system_proxy(self):
         """切换系统代理"""
