@@ -46,16 +46,20 @@ type State struct {
 	Servers         []Server   `json:"servers"`
 	CurrentServerID string     `json:"current_server_id"`
 	Running         bool       `json:"running"`
+	SystemProxy     bool       `json:"system_proxy_enabled"`
 	Logs            []LogEntry `json:"logs"`
 }
 
 type App struct {
-	ctx        context.Context
-	mu         sync.Mutex
-	configPath string
-	cfg        Config
-	logs       []LogEntry
-	cmd        *exec.Cmd
+	ctx                context.Context
+	mu                 sync.Mutex
+	configPath         string
+	cfg                Config
+	logs               []LogEntry
+	cmd                *exec.Cmd
+	manualStop         bool
+	systemProxyEnabled bool
+	proxySnapshot      *proxySnapshot
 }
 
 func NewApp() *App {
@@ -198,6 +202,9 @@ func (a *App) DeleteServer(id string) (State, error) {
 func (a *App) SetRoutingMode(mode string) (State, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.isRunningLocked() {
+		return State{}, errors.New("请先停止当前连接后再切换模式")
+	}
 	if mode != "global" && mode != "bypass_cn" && mode != "none" {
 		return State{}, errors.New("未知分流模式")
 	}
@@ -265,6 +272,13 @@ func (a *App) StartProxy() (State, error) {
 	}
 	a.cmd = cmd
 	a.addLogUnlocked("INFO", fmt.Sprintf("已启动：%s。", server.Name), "")
+	if err := a.enableSystemProxyLocked(*server); err != nil {
+		a.cmd = nil
+		a.mu.Unlock()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return State{}, fmt.Errorf("代理已启动，但系统代理设置失败：%w", err)
+	}
 	state := a.stateLocked()
 	a.mu.Unlock()
 
@@ -279,17 +293,40 @@ func (a *App) StopProxy() (State, error) {
 	a.mu.Lock()
 	cmd := a.cmd
 	if cmd == nil || cmd.Process == nil {
+		a.disableSystemProxyLocked("已清理系统代理。")
 		state := a.stateLocked()
 		a.mu.Unlock()
 		return state, nil
 	}
 	a.cmd = nil
+	a.manualStop = true
+	a.disableSystemProxyLocked("已关闭系统代理。")
 	a.mu.Unlock()
 
 	_ = cmd.Process.Kill()
 	a.addLog("WARN", "已停止。", "warn")
 	a.emitState()
 	return a.state(), nil
+}
+
+func (a *App) SetSystemProxy(enabled bool) (State, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if enabled {
+		if !a.isRunningLocked() {
+			return State{}, errors.New("请先启动代理")
+		}
+		server := a.currentServerLocked()
+		if server == nil {
+			return State{}, errors.New("没有可用服务器")
+		}
+		if err := a.enableSystemProxyLocked(*server); err != nil {
+			return State{}, err
+		}
+	} else {
+		a.disableSystemProxyLocked("已关闭系统代理。")
+	}
+	return a.stateLocked(), nil
 }
 
 func (a *App) TestLatency() (State, error) {
@@ -327,6 +364,7 @@ func (a *App) stateLocked() State {
 		Servers:         servers,
 		CurrentServerID: a.cfg.CurrentServerID,
 		Running:         a.isRunningLocked(),
+		SystemProxy:     a.systemProxyEnabled,
 		Logs:            logs,
 	}
 }
@@ -414,16 +452,56 @@ func (a *App) scanPipe(pipe interface{ Read([]byte) (int, error) }) {
 func (a *App) waitProcess(cmd *exec.Cmd) {
 	err := cmd.Wait()
 	a.mu.Lock()
-	if a.cmd == cmd {
+	isCurrent := a.cmd == cmd
+	manualStop := a.manualStop && !isCurrent
+	if isCurrent {
 		a.cmd = nil
+		a.disableSystemProxyLocked("进程退出，已清理系统代理。")
+	}
+	if a.manualStop {
+		a.manualStop = false
 	}
 	a.mu.Unlock()
+	if manualStop {
+		a.emitState()
+		return
+	}
 	if err != nil {
 		a.addLog("WARN", fmt.Sprintf("进程退出：%v。", err), "warn")
 	} else {
 		a.addLog("WARN", "进程已停止。", "warn")
 	}
 	a.emitState()
+}
+
+func (a *App) enableSystemProxyLocked(server Server) error {
+	if server.RoutingMode == "none" {
+		a.disableSystemProxyLocked("分流模式为“不改变”，已跳过系统代理。")
+		return nil
+	}
+	if strings.TrimSpace(server.Listen) == "" {
+		return errors.New("监听地址为空，无法设置系统代理")
+	}
+	if err := setSystemProxy(true, server.Listen, server.RoutingMode, &a.proxySnapshot); err != nil {
+		return err
+	}
+	a.systemProxyEnabled = true
+	a.addLogUnlocked("INFO", fmt.Sprintf("系统代理已设置：%s。", strings.TrimSpace(server.Listen)), "")
+	return nil
+}
+
+func (a *App) disableSystemProxyLocked(message string) {
+	if !a.systemProxyEnabled && a.proxySnapshot == nil {
+		return
+	}
+	if err := setSystemProxy(false, "", "", &a.proxySnapshot); err != nil {
+		a.addLogUnlocked("ERROR", fmt.Sprintf("系统代理清理失败：%v。", err), "error")
+		return
+	}
+	a.systemProxyEnabled = false
+	if strings.TrimSpace(message) != "" {
+		a.addLogUnlocked("INFO", message, "")
+	}
 }
 
 func (a *App) defaultConfigPath() string {
