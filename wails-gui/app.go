@@ -75,7 +75,7 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func (a *App) shutdown(ctx context.Context) {
-	_ = a.StopProxy()
+	_, _ = a.StopProxy()
 }
 
 func (a *App) GetState() (State, error) {
