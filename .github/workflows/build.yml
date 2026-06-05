@@ -125,33 +125,20 @@ jobs:
           go build -trimpath -ldflags="-s -w" -o ech-workers${{ matrix.exe_ext }} ech-workers.go
         shell: bash
 
-      # 下面这些步骤：只有打 tag 且 enable_gui == true 时才会执行，用来打包 GUI
-
-      - name: Set up Python
-        if: startsWith(github.ref, 'refs/tags/') && matrix.enable_gui == true
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      # 下面这些步骤：只有打 tag 且 enable_gui == true 时才会执行，用来打包 Wails GUI
 
       - name: Install system dependencies (Linux)
         if: startsWith(github.ref, 'refs/tags/') && matrix.goos == 'linux' && matrix.enable_gui == true
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pyqt5 python3-pyqt5.qtsvg python3-dev
+          sudo apt-get install -y build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev
         shell: bash
 
-      - name: Install PyInstaller, PySocks, and other dependencies
+      - name: Install Wails CLI
         if: startsWith(github.ref, 'refs/tags/') && matrix.enable_gui == true
         run: |
-          python -m pip install --upgrade pip
-          if [ "${{ matrix.goos }}" == "linux" ]; then
-            # Linux: 使用系统包中的 PyQt5，只安装其他依赖
-            pip install pyinstaller pystray Pillow PySocks
-            python -c "import PyQt5.QtWidgets; print('PyQt5 available')" || echo "PyQt5 not available, will skip GUI build"
-          else
-            # Windows / macOS: 从 PyPI 安装
-            pip install pyinstaller PyQt5 pystray Pillow PySocks
-          fi
+          go install github.com/wailsapp/wails/v2/cmd/wails@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
         shell: bash
 
       - name: Check application icon
@@ -166,7 +153,7 @@ jobs:
             elif [ -f "app_icon.png" ]; then
               echo "✓ Found app_icon.png (will be used as icon)"
             else
-              echo "⚠ No icon file found, PyInstaller will use default icon"
+              echo "⚠ No icon file found, Wails will use default icon"
             fi
           elif [ "${{ matrix.goos }}" == "darwin" ]; then
             if [ -f "app_icon.icns" ]; then
@@ -174,47 +161,27 @@ jobs:
             elif [ -f "app_icon.png" ]; then
               echo "✓ Found app_icon.png (will be used as icon)"
             else
-              echo "⚠ No icon file found, PyInstaller will use default icon"
+              echo "⚠ No icon file found, Wails will use default icon"
             fi
           else
             if [ -f "app_icon.png" ]; then
               echo "✓ Found app_icon.png"
             else
-              echo "⚠ No icon file found, PyInstaller will use default icon"
+              echo "⚠ No icon file found, Wails will use default icon"
             fi
           fi
         shell: bash
 
-      - name: Build Python executable
+      - name: Build Wails executable
         if: startsWith(github.ref, 'refs/tags/') && matrix.enable_gui == true
+        working-directory: wails-gui
         run: |
-          # 构建 PyInstaller 命令，根据平台添加图标
-          ICON_ARG=""
-          if [ "${{ matrix.goos }}" == "windows" ]; then
-            if [ -f "app_icon.ico" ]; then
-              ICON_ARG="--icon=app_icon.ico"
-            elif [ -f "app_icon.png" ]; then
-              ICON_ARG="--icon=app_icon.png"
-            fi
-            pyinstaller --onefile --windowed --name ECHWorkersGUI --hidden-import=PyQt5 $ICON_ARG gui.py
-          elif [ "${{ matrix.goos }}" == "linux" ]; then
-            if python -c "import PyQt5.QtWidgets" 2>/dev/null; then
-              if [ -f "app_icon.png" ]; then
-                ICON_ARG="--icon=app_icon.png"
-              fi
-              pyinstaller --onefile --name ECHWorkersGUI --hidden-import=PyQt5 $ICON_ARG gui.py
-            else
-              echo "PyQt5 not available, skipping GUI build for Linux"
-              echo "Only Go executable will be included"
-            fi
+          go mod tidy
+          if [ "${{ matrix.goos }}" == "linux" ]; then
+            export CGO_ENABLED=1
+            wails build -clean -tags webkit2_41
           else
-            # macOS
-            if [ -f "app_icon.icns" ]; then
-              ICON_ARG="--icon=app_icon.icns"
-            elif [ -f "app_icon.png" ]; then
-              ICON_ARG="--icon=app_icon.png"
-            fi
-            pyinstaller --onefile --name ECHWorkersGUI --hidden-import=PyQt5 $ICON_ARG gui.py
+            wails build -clean
           fi
         shell: bash
 
@@ -262,12 +229,19 @@ jobs:
               cp app_icon.png release/
             fi
             if [ "${{ matrix.goos }}" == "windows" ]; then
-              if [ -f "dist/ECHWorkersGUI.exe" ]; then
-                cp dist/ECHWorkersGUI.exe release/
+              if [ -f "wails-gui/build/bin/ECHWorkersGUI.exe" ]; then
+                cp wails-gui/build/bin/ECHWorkersGUI.exe release/
+              fi
+            elif [ "${{ matrix.goos }}" == "darwin" ]; then
+              if [ -d "wails-gui/build/bin/ECHWorkersGUI.app" ]; then
+                cp -R wails-gui/build/bin/ECHWorkersGUI.app release/
+              elif [ -f "wails-gui/build/bin/ECHWorkersGUI" ]; then
+                cp wails-gui/build/bin/ECHWorkersGUI release/
+                chmod +x release/ECHWorkersGUI
               fi
             else
-              if [ -f "dist/ECHWorkersGUI" ]; then
-                cp dist/ECHWorkersGUI release/
+              if [ -f "wails-gui/build/bin/ECHWorkersGUI" ]; then
+                cp wails-gui/build/bin/ECHWorkersGUI release/
                 chmod +x release/ECHWorkersGUI
               elif [ "${{ matrix.goos }}" == "linux" ]; then
                 echo "GUI executable not built, only Go executable will be included"
@@ -291,9 +265,11 @@ jobs:
             fi
             if [ "${{ matrix.enable_gui }}" = "true" ]; then
               if [ "${{ matrix.goos }}" == "windows" ]; then
-                echo "- ECHWorkersGUI.exe: Python GUI client (standalone executable)"
+                echo "- ECHWorkersGUI.exe: Wails GUI client (uses ech-workers.exe as proxy core)"
+              elif [ "${{ matrix.goos }}" == "darwin" ] && [ -d "release/ECHWorkersGUI.app" ]; then
+                echo "- ECHWorkersGUI.app: Wails GUI client (uses ech-workers as proxy core)"
               elif [ -f "release/ECHWorkersGUI" ]; then
-                echo "- ECHWorkersGUI: Python GUI client (standalone executable)"
+                echo "- ECHWorkersGUI: Wails GUI client (uses ech-workers as proxy core)"
               else
                 echo "- Note: GUI client not available for this architecture"
                 echo "  Use ech-workers from command line instead"
@@ -306,6 +282,9 @@ jobs:
             if [ "${{ matrix.goos }}" == "windows" ]; then
               echo "1. Double-click ECHWorkersGUI.exe to launch the GUI (if present)"
               echo "2. Or run ech-workers.exe from command line"
+            elif [ "${{ matrix.goos }}" == "darwin" ]; then
+              echo "1. Double-click ECHWorkersGUI.app to launch the GUI (if present)"
+              echo "2. Or run ./ech-workers from command line"
             else
               echo "1. Run ./ech-workers from command line"
               if [ "${{ matrix.enable_gui }}" = "true" ]; then
