@@ -14,6 +14,8 @@ const terminal = document.querySelector("[data-terminal]");
 const serverList = document.querySelector("[data-server-list]");
 const searchInput = document.querySelector("[data-search]");
 const configSelect = document.querySelector("[data-config-server]");
+const speedButton = document.querySelector("[data-speed-test]");
+const speedLabel = document.querySelector("[data-speed-label]");
 
 const fields = {
   name: document.querySelector("[data-config-name]"),
@@ -30,8 +32,11 @@ let state = {
   servers: [],
   current_server_id: "",
   running: false,
+  system_proxy_enabled: false,
   logs: [],
 };
+
+let speedTesting = false;
 
 function appApi() {
   return window.go?.main?.App || null;
@@ -85,7 +90,10 @@ async function fallback(method, ...args) {
       state.current_server_id = state.servers[0].id;
     }
   }
-  if (method === "TestLatency") pushLog("INFO", "真实链路：45ms。");
+  if (method === "TestLatency") {
+    currentServer().latency_ms = 45;
+    pushLog("INFO", "真实链路：45ms。");
+  }
   if (method === "ClearLogs") state.logs = [];
   return state;
 }
@@ -101,6 +109,7 @@ function defaultServer(id = "default", name = "默认服务器") {
     dns: "dns.alidns.com/dns-query",
     ech: "cloudflare-ech.com",
     routing_mode: "bypass_cn",
+    latency_ms: 0,
   };
 }
 
@@ -143,6 +152,7 @@ function applyState(nextState) {
     servers: nextState.servers || [],
     current_server_id: nextState.current_server_id || "",
     running: Boolean(nextState.running),
+    system_proxy_enabled: Boolean(nextState.system_proxy_enabled),
     logs: nextState.logs || [],
   };
   if (!state.servers.length) {
@@ -214,7 +224,7 @@ function createServerCard(server) {
     </span>
     <span class="server-info">
       <strong>${escapeHtml(server.name || "未命名服务器")}</strong>
-      <small><b>ech</b><i class="latency">未测速</i></small>
+      <small><b>ech</b><i class="${latencyClass(server)}">${latencyLabel(server)}</i></small>
     </span>
     <span class="server-radio"></span>
     <button class="edit-button" type="button" aria-label="编辑 ${escapeHtml(server.name || "服务器")}">
@@ -234,6 +244,19 @@ function createServerCard(server) {
     switchPage("config");
   });
   return card;
+}
+
+function latencyLabel(server) {
+  const latency = Number(server.latency_ms || 0);
+  return latency > 0 ? `${latency}ms` : "未测速";
+}
+
+function latencyClass(server) {
+  const latency = Number(server.latency_ms || 0);
+  if (latency <= 0) return "latency";
+  if (latency < 120) return "latency is-good";
+  if (latency < 280) return "latency is-ok";
+  return "latency is-slow";
 }
 
 function renderConfig() {
@@ -308,6 +331,14 @@ async function updateFromBackend(method, ...args) {
   }
 }
 
+function setSpeedTesting(testing) {
+  speedTesting = testing;
+  speedButton.classList.toggle("is-testing", testing);
+  speedButton.disabled = testing;
+  speedButton.setAttribute("aria-busy", String(testing));
+  speedLabel.textContent = testing ? "测试中" : "测速";
+}
+
 function routingLabel(mode) {
   return {
     global: "全局",
@@ -355,7 +386,15 @@ modeButtons.forEach((button) => {
   button.addEventListener("click", () => updateFromBackend("SetRoutingMode", button.dataset.modeOption));
 });
 
-document.querySelector("[data-speed-test]").addEventListener("click", () => updateFromBackend("TestLatency"));
+speedButton.addEventListener("click", async () => {
+  if (speedTesting) return;
+  setSpeedTesting(true);
+  try {
+    await updateFromBackend("TestLatency");
+  } finally {
+    setSpeedTesting(false);
+  }
+});
 document.querySelector("[data-new-server]").addEventListener("click", async () => {
   await updateFromBackend("CreateServer");
   switchPage("config");

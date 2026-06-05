@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,6 +29,7 @@ type Server struct {
 	DNS         string `json:"dns"`
 	ECH         string `json:"ech"`
 	RoutingMode string `json:"routing_mode"`
+	LatencyMS   int64  `json:"latency_ms,omitempty"`
 }
 
 type Config struct {
@@ -330,8 +332,32 @@ func (a *App) SetSystemProxy(enabled bool) (State, error) {
 }
 
 func (a *App) TestLatency() (State, error) {
+	a.mu.Lock()
+	if !a.isRunningLocked() {
+		a.mu.Unlock()
+		return State{}, errors.New("请先启动代理，再测试真实链路延迟")
+	}
+	idx := a.currentServerIndexLocked()
+	if idx < 0 {
+		a.mu.Unlock()
+		return State{}, errors.New("没有可用服务器")
+	}
+	server := a.cfg.Servers[idx]
+	a.addLogUnlocked("INFO", "开始测速：https://www.gstatic.com/generate_204。", "")
+	a.mu.Unlock()
+
+	proxyURL, err := url.Parse("http://" + normalizeProxyListen(server.Listen))
+	if err != nil {
+		a.addLog("ERROR", fmt.Sprintf("测速失败：监听地址无效：%v。", err), "error")
+		return a.state(), err
+	}
 	start := time.Now()
-	client := http.Client{Timeout: 8 * time.Second}
+	client := http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
+	}
 	resp, err := client.Get("https://www.gstatic.com/generate_204")
 	elapsed := time.Since(start)
 	if err != nil {
@@ -339,8 +365,15 @@ func (a *App) TestLatency() (State, error) {
 		return a.state(), err
 	}
 	defer resp.Body.Close()
-	a.addLog("INFO", fmt.Sprintf("真实链路：%dms。", elapsed.Milliseconds()), "")
-	return a.state(), nil
+	latency := elapsed.Milliseconds()
+	a.mu.Lock()
+	if idx := a.currentServerIndexLocked(); idx >= 0 && a.cfg.Servers[idx].ID == server.ID {
+		a.cfg.Servers[idx].LatencyMS = latency
+	}
+	a.addLogUnlocked("INFO", fmt.Sprintf("真实链路：%dms，HTTP %d。", latency, resp.StatusCode), "")
+	state := a.stateLocked()
+	a.mu.Unlock()
+	return state, nil
 }
 
 func (a *App) ClearLogs() (State, error) {

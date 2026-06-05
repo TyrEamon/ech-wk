@@ -748,6 +748,26 @@ body[data-theme] .mode-options button.is-active {
   font-size: 10px;
   font-weight: 800;
   letter-spacing: 0.04em;
+  transition: color 150ms var(--ease), border-color 150ms var(--ease), background-color 150ms var(--ease), transform 150ms var(--ease);
+}
+
+.speed-button:hover {
+  border-color: var(--line-strong);
+  transform: translateY(-1px);
+}
+
+.speed-button:active {
+  transform: translateY(0) scale(0.98);
+}
+
+.speed-button:disabled {
+  cursor: wait;
+}
+
+.speed-button.is-testing {
+  color: var(--text);
+  border-color: var(--line-strong);
+  background: var(--panel-2);
 }
 
 .bolt-svg {
@@ -759,6 +779,22 @@ body[data-theme] .mode-options button.is-active {
   stroke-width: 1.9;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+.speed-button.is-testing .bolt-svg {
+  animation: boltPulse 760ms var(--ease) infinite;
+}
+
+@keyframes boltPulse {
+  0%,
+  100% {
+    opacity: 0.58;
+    transform: translateY(0) scale(0.92);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-1px) scale(1.08);
+  }
 }
 
 .server-groups {
@@ -863,6 +899,18 @@ body[data-theme] .mode-options button.is-active {
   font-weight: 800;
 }
 
+.latency.is-good {
+  color: #27c969;
+}
+
+.latency.is-ok {
+  color: #d3a51f;
+}
+
+.latency.is-slow {
+  color: #c96b6b;
+}
+
 .latency::before {
   content: "";
   display: inline-block;
@@ -922,13 +970,32 @@ body[data-theme] .mode-options button.is-active {
   z-index: 8;
   width: 46px;
   height: 46px;
+  display: grid;
+  place-items: center;
+  padding: 0;
   color: var(--invert);
   border: 1px solid var(--line-strong);
   border-radius: 999px;
   background: var(--text);
   box-shadow: 0 16px 32px var(--shadow);
-  font-size: 26px;
-  line-height: 1;
+  font-size: 0;
+}
+
+.fab::before,
+.fab::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 16px;
+  height: 2px;
+  border-radius: 999px;
+  background: currentColor;
+  transform: translate(-50%, -50%);
+}
+
+.fab::after {
+  transform: translate(-50%, -50%) rotate(90deg);
 }
 
 .config-page {
