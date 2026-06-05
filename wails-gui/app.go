@@ -62,6 +62,8 @@ type App struct {
 	manualStop         bool
 	systemProxyEnabled bool
 	proxySnapshot      *proxySnapshot
+	quitRequested      bool
+	tray               *trayManager
 }
 
 func NewApp() *App {
@@ -73,6 +75,7 @@ func NewApp() *App {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	a.setupTray()
 	a.addLog("INFO", "初始化完成。", "")
 	if server := a.currentServer(); server != nil {
 		a.addLog("INFO", fmt.Sprintf("已载入：%s。", server.Name), "")
@@ -81,7 +84,55 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func (a *App) shutdown(ctx context.Context) {
+	a.cleanupTray()
 	_, _ = a.StopProxy()
+}
+
+func (a *App) beforeClose(ctx context.Context) bool {
+	a.mu.Lock()
+	quitting := a.quitRequested
+	a.mu.Unlock()
+	if quitting {
+		return false
+	}
+	wailsRuntime.WindowHide(ctx)
+	a.addLog("INFO", "已最小化到托盘。", "")
+	return true
+}
+
+func (a *App) showWindow() {
+	if a.ctx == nil {
+		return
+	}
+	wailsRuntime.WindowShow(a.ctx)
+	wailsRuntime.WindowUnminimise(a.ctx)
+}
+
+func (a *App) quitApplication() {
+	a.mu.Lock()
+	a.quitRequested = true
+	a.mu.Unlock()
+	if a.ctx != nil {
+		wailsRuntime.Quit(a.ctx)
+	}
+}
+
+func (a *App) setRoutingModeFromTray(mode string) {
+	wasRunning := a.state().Running
+	if wasRunning {
+		a.addLog("INFO", "正在切换模式，重启代理。", "")
+		_, _ = a.StopProxy()
+		time.Sleep(350 * time.Millisecond)
+	}
+	if _, err := a.SetRoutingMode(mode); err != nil {
+		a.addLog("ERROR", err.Error(), "error")
+		return
+	}
+	if wasRunning {
+		if _, err := a.StartProxy(); err != nil {
+			a.addLog("ERROR", fmt.Sprintf("重启代理失败：%v。", err), "error")
+		}
+	}
 }
 
 func (a *App) GetState() (State, error) {

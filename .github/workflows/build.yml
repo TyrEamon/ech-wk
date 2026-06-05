@@ -162,6 +162,9 @@ jobs:
             if [ -f "app_icon.png" ]; then
               cp app_icon.png release/
             fi
+            if [ -f "app_icon.ico" ]; then
+              cp app_icon.ico release/
+            fi
             if [ "${{ matrix.goos }}" == "windows" ]; then
               if [ -f "wails-gui/build/bin/ECHWorkersGUI.exe" ]; then
                 cp wails-gui/build/bin/ECHWorkersGUI.exe release/
