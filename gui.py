@@ -86,7 +86,7 @@ except ImportError:
     print("安装命令: pip3 install PyQt5")
     sys.exit(1)
 
-APP_VERSION = "1.7"
+APP_VERSION = "1.8"
 APP_TITLE = f"ECH Workers 客户端 v{APP_VERSION}"
 
 # 中国IP列表文件名（离线版本，放在程序目录）
@@ -575,6 +575,8 @@ class MainWindow(QMainWindow):
 
         selected_card = QFrame()
         selected_card.setObjectName("selectedServerCard")
+        selected_card.setCursor(Qt.PointingHandCursor)
+        selected_card.mousePressEvent = lambda event: self.show_home_server_menu(selected_card)
         selected_layout = QHBoxLayout(selected_card)
         selected_layout.setContentsMargins(14, 12, 14, 12)
         selected_layout.setSpacing(12)
@@ -685,6 +687,19 @@ class MainWindow(QMainWindow):
         config_layout_outer = QVBoxLayout(config_content)
         config_layout_outer.setContentsMargins(18, 18, 18, 22)
         config_layout_outer.setSpacing(14)
+
+        detail_header = QHBoxLayout()
+        detail_header.setSpacing(10)
+        btn_back = QPushButton("返回")
+        btn_back.setObjectName("ghostButton")
+        btn_back.setCursor(Qt.PointingHandCursor)
+        btn_back.clicked.connect(lambda: self._set_current_page(1))
+        detail_title = QLabel("编辑服务器")
+        detail_title.setObjectName("detailTitle")
+        detail_header.addWidget(btn_back)
+        detail_header.addWidget(detail_title)
+        detail_header.addStretch()
+        config_layout_outer.addLayout(detail_header)
 
         config_panel, config_layout = self._create_panel("当前配置", "这里编辑的是选中服务器的真实参数")
         self.server_combo = QComboBox()
@@ -1104,6 +1119,7 @@ class MainWindow(QMainWindow):
         button = QPushButton(text)
         button.setObjectName("navButton")
         button.setProperty("active", False)
+        button.setProperty("pageIndex", page_index)
         button.clicked.connect(lambda: self._set_current_page(page_index))
         return button
 
@@ -1190,6 +1206,26 @@ class MainWindow(QMainWindow):
                 self.server_combo.setCurrentIndex(i)
                 break
 
+    def show_home_server_menu(self, anchor_widget):
+        """在主页选中服务器卡片上打开服务器切换菜单。"""
+        if self.process_thread and self.process_thread.is_running:
+            QMessageBox.warning(self, "提示", "请先停止当前连接后再切换服务器")
+            return
+        if not self.config_manager.servers:
+            return
+
+        menu = QMenu(self)
+        current_id = self.config_manager.current_server_id
+        for server in sorted(self.config_manager.servers, key=lambda x: x.get('name', '')):
+            server_id = server.get('id')
+            action = QAction(server.get('name') or '未命名服务器', self)
+            action.setCheckable(True)
+            action.setChecked(server_id == current_id)
+            action.triggered.connect(lambda checked=False, sid=server_id: self._select_server_from_card(sid))
+            menu.addAction(action)
+
+        menu.exec_(anchor_widget.mapToGlobal(anchor_widget.rect().bottomLeft()))
+
     def open_server_config(self, server_id):
         """进入选中服务器的配置页。"""
         self._select_server_from_card(server_id)
@@ -1241,8 +1277,8 @@ class MainWindow(QMainWindow):
         """切换主内容页并刷新导航态。"""
         self.pages.setCurrentIndex(index)
         self._fade_in_current_page()
-        for i, button in enumerate(self.nav_buttons):
-            button.setProperty("active", i == index)
+        for button in self.nav_buttons:
+            button.setProperty("active", button.property("pageIndex") == index)
             button.style().unpolish(button)
             button.style().polish(button)
 
@@ -2001,6 +2037,11 @@ class MainWindow(QMainWindow):
             border-radius: 9px;
         }
 
+        QFrame#selectedServerCard:hover {
+            background-color: #191d2b;
+            border: 1px solid #00dbe9;
+        }
+
         QFrame#homeLogCard {
             background-color: #11131b;
             border: 1px solid #273142;
@@ -2053,6 +2094,12 @@ class MainWindow(QMainWindow):
         QLabel#pageTitle {
             color: #f4f7ff;
             font-size: 30px;
+            font-weight: 800;
+        }
+
+        QLabel#detailTitle {
+            color: #f4f7ff;
+            font-size: 18px;
             font-weight: 800;
         }
 
@@ -2700,6 +2747,7 @@ class MainWindow(QMainWindow):
                 self.append_log(f"[系统] 已删除服务器: {name}\n")
                 self._update_dashboard_summary()
                 self._refresh_server_cards()
+                self._set_current_page(1)
     
     def rename_server(self):
         """重命名服务器"""
