@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -25,10 +26,14 @@ const (
 	cmdExitApp     = 1006
 
 	wmCommand       = 0x0111
+	wmContextMenu   = 0x007b
 	wmClose         = 0x0010
 	wmDestroy       = 0x0002
+	wmNull          = 0x0000
 	wmRButtonUp     = 0x0205
 	wmLButtonDblClk = 0x0203
+	ninSelect       = 0x0400
+	ninKeySelect    = 0x0401
 
 	nimAdd        = 0x00000000
 	nimDelete     = 0x00000002
@@ -153,6 +158,8 @@ func (a *App) cleanupTray() {
 }
 
 func (t *trayManager) run() {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	defer close(t.ready)
 
 	hInstance, _, _ := procGetModuleHandleW.Call(0)
@@ -285,6 +292,7 @@ func (t *trayManager) showMenu() {
 	procGetCursorPos.Call(uintptr(unsafe.Pointer(&cursor)))
 	procSetForegroundWindow.Call(uintptr(t.hwnd))
 	procTrackPopupMenu.Call(menu, tpmRightBtn, uintptr(cursor.x), uintptr(cursor.y), 0, uintptr(t.hwnd), 0)
+	procPostMessageW.Call(uintptr(t.hwnd), wmNull, 0, 0)
 }
 
 func (t *trayManager) appendMenu(menu uintptr, id uint16, label string, flags uintptr) {
@@ -324,11 +332,14 @@ func trayWindowProc(hwnd uintptr, message uint32, wParam, lParam uintptr) uintpt
 		return ret
 	}
 	switch message {
+	case wmContextMenu:
+		tray.showMenu()
+		return 0
 	case trayCallback:
 		switch uint32(lParam) {
-		case wmLButtonDblClk:
+		case wmLButtonDblClk, ninSelect, ninKeySelect:
 			go tray.app.showWindow()
-		case wmRButtonUp:
+		case wmRButtonUp, wmContextMenu:
 			tray.showMenu()
 		}
 		return 0
