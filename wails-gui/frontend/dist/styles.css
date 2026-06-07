@@ -220,7 +220,7 @@ body[data-theme="light"] .theme-knob {
 
 .viewport {
   position: absolute;
-  inset: 42px 0 62px;
+  inset: 42px 0 70px;
   overflow: hidden;
 }
 
@@ -1224,7 +1224,7 @@ body[data-theme] .mode-options button.is-active {
   position: absolute;
   left: 0;
   right: 0;
-  bottom: 0;
+  bottom: 8px;
   height: 62px;
   display: grid;
   grid-template-columns: repeat(3, 1fr);
