@@ -1214,6 +1214,16 @@ body[data-theme] .mode-options button.is-active {
   grid-template-columns: repeat(4, 1fr);
 }
 
+.bottom-nav-4 button {
+  font-size: 9px;
+  gap: 3px;
+}
+
+.bottom-nav-4 .icon {
+  width: 18px;
+  height: 18px;
+}
+
 /* ============================================
    关于页面
    ============================================ */
